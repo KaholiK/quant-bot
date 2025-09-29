@@ -259,9 +259,12 @@ class TripleBarrierLabeler:
     
     def __init__(self, config: Dict[str, Any]):
         """Initialize with configuration."""
-        self.profit_take_mult = config['labels']['profit_take_mult']
-        self.stop_loss_mult = config['labels']['stop_loss_mult']
-        self.horizon_bars = config['labels']['horizon_bars']
+        # Safe extraction with fallbacks to defaults
+        labels_config = config.get('labels', {})
+        
+        self.profit_take_mult = labels_config.get('tp_atr_mult', 1.75)
+        self.stop_loss_mult = labels_config.get('sl_atr_mult', 1.00)
+        self.horizon_bars = labels_config.get('horizon_bars', 5)
         
     def fit_transform(self, prices: pd.Series, atr: pd.Series) -> Tuple[pd.Series, pd.Series, pd.DataFrame]:
         """Apply triple barrier labeling."""

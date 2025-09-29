@@ -30,7 +30,7 @@ try:
     from algos.core.feature_pipe import FeaturePipeline
     from algos.core.labels import TripleBarrierLabeler
     from algos.core.cv_utils import PurgedKFold
-    from algos.core.config_loader import load_config
+    from algos.core.config_loader import load_config, get_legacy_dict
     
     DEPENDENCIES_AVAILABLE = True
 except ImportError as e:
@@ -187,8 +187,13 @@ class ClassifierTrainer:
     def __init__(self, config_path: str = "config.yaml"):
         """Initialize trainer with configuration."""
         self.config = load_config(config_path)
-        self.feature_pipeline = FeaturePipeline(self.config)
-        self.labeler = TripleBarrierLabeler(self.config)
+        self.feature_pipeline = FeaturePipeline(get_legacy_dict(self.config))
+        self.labeler = TripleBarrierLabeler(get_legacy_dict(self.config))
+        
+        # Log label settings
+        logger.info(f"Label settings: horizon_bars={self.labeler.horizon_bars}, "
+                   f"tp_atr_mult={self.labeler.profit_take_mult}, "
+                   f"sl_atr_mult={self.labeler.stop_loss_mult}")
         
     def prepare_training_data(self, price_data: Dict[str, pd.DataFrame]) -> tuple:
         """
@@ -486,12 +491,27 @@ def main():
         
         classifier_path = output_dir / 'xgb_classifier.joblib'
         meta_path = output_dir / 'meta_filter.joblib'
+        config_path = output_dir / 'training_config.json'
+        
+        # Save label settings alongside the model
+        import json
+        label_settings = {
+            'horizon_bars': trainer.labeler.horizon_bars,
+            'tp_atr_mult': trainer.labeler.profit_take_mult,
+            'sl_atr_mult': trainer.labeler.stop_loss_mult,
+            'features_config': get_legacy_dict(trainer.config).get('features', {}),
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        with open(config_path, 'w') as f:
+            json.dump(label_settings, f, indent=2)
         
         joblib.dump(classifier_result, classifier_path)
         joblib.dump(meta_result, meta_path)
         
         logger.info(f"✓ Classifier saved to: {classifier_path}")
         logger.info(f"✓ Meta-model saved to: {meta_path}")
+        logger.info(f"✓ Training config saved to: {config_path}")
         
         # Print summary
         logger.info("=" * 50)

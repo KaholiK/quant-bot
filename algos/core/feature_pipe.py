@@ -16,13 +16,17 @@ class FeaturePipeline:
     def __init__(self, config: Dict[str, Any]):
         """Initialize feature pipeline with configuration."""
         self.config = config
-        self.returns_periods = config['features']['returns_periods']
-        self.sma_periods = config['features']['sma_periods']
-        self.ema_periods = config['features']['ema_periods']
-        self.macd_params = config['features']['macd_params']
-        self.atr_period = config['features']['atr_period']
-        self.bollinger_period = config['features']['bollinger_period']
-        self.vol_window = config['features']['vol_window']
+        
+        # Safe extraction with fallbacks to defaults
+        features_config = config.get('features', {})
+        
+        self.returns_periods = features_config.get('returns_periods', [1, 5, 20, 60])
+        self.sma_periods = features_config.get('sma_periods', [20, 50, 200])
+        self.ema_periods = features_config.get('ema_periods', [12, 26])
+        self.macd_params = features_config.get('macd_params', {"fast": 12, "slow": 26, "signal": 9})
+        self.atr_period = features_config.get('atr_period', 14)
+        self.bollinger_period = features_config.get('bollinger_period', 20)
+        self.vol_window = features_config.get('vol_window', 20)
         
         # Cache for feature calculations
         self._feature_cache: Dict[str, pd.DataFrame] = {}
@@ -40,27 +44,74 @@ class FeaturePipeline:
         """Calculate technical indicators using TA library."""
         features = pd.DataFrame(index=df.index)
         
-        # Simple Moving Averages
-        for period in self.sma_periods:
-            features[f'sma_{period}'] = ta.trend.sma_indicator(df['close'], window=period)
-            features[f'price_to_sma_{period}'] = df['close'] / features[f'sma_{period}'] - 1.0
+        # Ensure required columns exist
+        required_cols = ['close', 'high', 'low']
+        for col in required_cols:
+            if col not in df.columns:
+                logger.warning(f"Missing required column '{col}' for technical indicators")
+                return features
+        
+        try:
+            # Simple Moving Averages
+            for period in self.sma_periods:
+                if len(df) >= period:
+                    features[f'sma_{period}'] = ta.trend.sma_indicator(df['close'], window=period)
+                    features[f'price_to_sma_{period}'] = df['close'] / features[f'sma_{period}'] - 1.0
+                else:
+                    features[f'sma_{period}'] = np.nan
+                    features[f'price_to_sma_{period}'] = np.nan
+                    
+            # Exponential Moving Averages
+            for period in self.ema_periods:
+                if len(df) >= period:
+                    features[f'ema_{period}'] = ta.trend.ema_indicator(df['close'], window=period)
+                else:
+                    features[f'ema_{period}'] = np.nan
             
-        # Exponential Moving Averages
-        for period in self.ema_periods:
-            features[f'ema_{period}'] = ta.trend.ema_indicator(df['close'], window=period)
+            # MACD
+            if len(df) >= max(self.macd_params['slow'], self.macd_params['fast'], self.macd_params['signal']):
+                macd_line = ta.trend.macd_diff(df['close'], 
+                                               window_slow=self.macd_params['slow'],
+                                               window_fast=self.macd_params['fast'],
+                                               window_sign=self.macd_params['signal'])
+                macd_signal = ta.trend.macd_signal(df['close'],
+                                                  window_slow=self.macd_params['slow'], 
+                                                  window_fast=self.macd_params['fast'],
+                                                  window_sign=self.macd_params['signal'])
+                features['macd_diff'] = macd_line
+                features['macd_signal'] = macd_signal
+                features['macd_histogram'] = macd_line - macd_signal
+            else:
+                features['macd_diff'] = np.nan
+                features['macd_signal'] = np.nan
+                features['macd_histogram'] = np.nan
             
-        # MACD
-        macd_line = ta.trend.macd_diff(df['close'], 
-                                       window_slow=self.macd_params[1],
-                                       window_fast=self.macd_params[0],
-                                       window_sign=self.macd_params[2])
-        macd_signal = ta.trend.macd_signal(df['close'],
-                                          window_slow=self.macd_params[1], 
-                                          window_fast=self.macd_params[0],
-                                          window_sign=self.macd_params[2])
-        features['macd_diff'] = macd_line
-        features['macd_signal'] = macd_signal
-        features['macd_histogram'] = macd_line - macd_signal
+            # ATR
+            if len(df) >= self.atr_period:
+                features['atr'] = ta.volatility.average_true_range(
+                    df['high'], df['low'], df['close'], window=self.atr_period
+                )
+            else:
+                features['atr'] = np.nan
+            
+            # Bollinger Bands
+            if len(df) >= self.bollinger_period:
+                bb_high = ta.volatility.bollinger_hband(df['close'], window=self.bollinger_period)
+                bb_low = ta.volatility.bollinger_lband(df['close'], window=self.bollinger_period)
+                bb_mid = ta.volatility.bollinger_mavg(df['close'], window=self.bollinger_period)
+                features['bb_upper'] = bb_high
+                features['bb_lower'] = bb_low
+                features['bb_mid'] = bb_mid
+                features['bb_width'] = (bb_high - bb_low) / bb_mid
+                features['bb_position'] = (df['close'] - bb_low) / (bb_high - bb_low)
+            else:
+                for col in ['bb_upper', 'bb_lower', 'bb_mid', 'bb_width', 'bb_position']:
+                    features[col] = np.nan
+                    
+        except Exception as e:
+            logger.error(f"Error calculating technical indicators: {e}")
+            # Return empty dataframe on error but maintain index
+            return pd.DataFrame(index=df.index)
         
         # ATR
         features['atr'] = ta.volatility.average_true_range(
