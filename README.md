@@ -102,6 +102,38 @@ Edit `config.yaml` to customize:
 - Strategy parameters
 - Model paths
 
+### How to Run Tests and Audit Locally
+
+To run tests and audit your local development environment:
+
+```bash
+# 1. Set up virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# 2. Install the package in editable mode
+pip install -e .
+
+# 3. Run linting
+ruff check .
+ruff format .
+
+# 4. Run type checking (optional)
+mypy algos
+
+# 5. Run tests
+pytest
+
+# 6. Run self-audit to verify repository integrity
+python scripts/self_audit.py
+```
+
+The self-audit script will:
+- Verify all required files and directories exist
+- Validate `config.yaml` schema and structure
+- Test module imports to catch syntax errors
+- Generate a detailed report in `self_audit_report.md`
+
 ## 🏗️ Architecture
 
 ### Core Modules (`algos/core/`)
