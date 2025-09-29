@@ -40,7 +40,7 @@ class RiskManager:
         self.trade_history: List[Dict[str, Any]] = []
         self.daily_returns: List[float] = []
         
-        logger.info("Risk manager initialized with kill switch at {:.1%} drawdown".format(self.kill_switch_dd))
+        logger.info(f"Risk manager initialized with kill switch at {self.kill_switch_dd:.1%} drawdown")
         
     def calculate_position_size(self, 
                               symbol: str,
