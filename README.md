@@ -1,6 +1,60 @@
 # Quant Bot - Production-Grade Quantitative Trading System
 
+[![CI](https://github.com/KaholiK/quant-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/KaholiK/quant-bot/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+
 A sophisticated Python 3.11 quantitative trading bot for QuantConnect LEAN that handles US equities (S&P-100) and crypto (BTCUSD, ETHUSD) with advanced machine learning, risk management, and multiple trading strategies.
+
+## 🚀 Quick Start
+
+```bash
+# Clone and install
+git clone https://github.com/KaholiK/quant-bot.git
+cd quant-bot
+pip install -e .
+
+# Run self-audit to verify setup
+python scripts/self_audit.py
+
+# Run tests
+pytest
+
+# Train models offline
+python scripts/train_classifier.py
+python scripts/train_ppo.py --skip-if-no-deps
+```
+
+## ⚙️ Configuration
+
+The bot uses a type-safe configuration system with pydantic validation:
+
+```yaml
+# config.yaml
+trading:
+  universe:
+    equities: SP100
+    crypto: [BTCUSD, ETHUSD]
+  bars:
+    equities: 30m
+    crypto: 15m
+  risk:
+    per_trade_risk_pct: 0.01  # 1% risk per trade (max 5%)
+    max_leverage: 2.0
+    single_name_max_pct: 0.10
+    sector_max_pct: 0.30
+    kill_switch_dd: 0.20  # 20% drawdown kill switch
+  models:
+    classifier_path: models/xgb_classifier.joblib
+    meta_model_path: models/meta_filter.joblib
+    rl_policy_path: policies/ppo_policy.zip
+  strategies:
+    scalper_sigma: {enabled: true}
+    trend_breakout: {enabled: true}
+    bull_mode: {enabled: true}
+    market_neutral: {enabled: false}
+    gamma_reversal: {enabled: false}
+```
 
 ## 🚀 Features
 
