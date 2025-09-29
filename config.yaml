@@ -1,51 +1,34 @@
 # QuantConnect LEAN Configuration for Quant Bot
 trading:
-  # Universe configuration
   universe:
-    equities: SP100  # S&P-100 stocks
+    equities: SP100
     crypto: [BTCUSD, ETHUSD]
-  
-  # Bar timeframes
   bars:
     equities: 30m
     crypto: 15m
-  
-  # Risk management
   risk:
-    per_trade_risk_pct: 0.01  # 1% risk per trade
+    per_trade_risk_pct: 0.01
     max_leverage: 2.0
-    single_name_max_pct: 0.10  # 10% max per position
-    sector_max_pct: 0.30    # 30% max per sector
-    kill_switch_dd: 0.20    # 20% drawdown kill switch
-    
-  # Model paths
+    single_name_max_pct: 0.10
+    sector_max_pct: 0.30
+    asset_class_caps: { crypto_max_gross_pct: 0.50 }
+    kill_switch_dd: 0.20
+    vol_target_ann: 0.12
   models:
     classifier_path: models/xgb_classifier.joblib
     meta_model_path: models/meta_filter.joblib
     rl_policy_path: policies/ppo_policy.zip
-  
-  # Strategy parameters
   strategies:
-    scalper_sigma:
-      enabled: true
-    trend_breakout:
-      enabled: true
-    bull_mode:
-      enabled: true
-    market_neutral:
-      enabled: false
-    gamma_reversal:
-      enabled: false
-  
-  # Learning configuration
+    scalper_sigma: {enabled: true}
+    trend_breakout: {enabled: true}
+    bull_mode: {enabled: true}
+    market_neutral: {enabled: false}
+    gamma_reversal: {enabled: false}
   learning:
-    cv:
-      scheme: purged_kfold_embargo
-      folds: 5
-      embargo_frac: 0.02
+    cv: {scheme: purged_kfold_embargo, folds: 5, embargo_frac: 0.02}
     retrain_cadence: weekly
-  
-  # Execution settings
+    gates: {oos_sortino_min: 1.2, oos_profit_factor_min: 1.15, oos_max_dd_max: 0.06}
   execution:
     maker_ladder_offsets_atr: [0.10, 0.20, 0.30]
     min_ms_between_orders: 300
+    min_hold_secs: 60

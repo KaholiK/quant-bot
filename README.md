@@ -1,23 +1,41 @@
 # Quant Bot - Production-Grade Quantitative Trading System
 
 [![CI](https://github.com/KaholiK/quant-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/KaholiK/quant-bot/actions/workflows/ci.yml)
+[![Retraining](https://github.com/KaholiK/quant-bot/actions/workflows/retrain.yml/badge.svg)](https://github.com/KaholiK/quant-bot/actions/workflows/retrain.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A sophisticated Python 3.11 quantitative trading bot for QuantConnect LEAN that handles US equities (S&P-100) and crypto (BTCUSD, ETHUSD) with advanced machine learning, risk management, and multiple trading strategies.
+A sophisticated Python 3.11 quantitative trading bot for QuantConnect LEAN with advanced machine learning, risk management, multiple trading strategies, and continuous learning capabilities. Designed for production trading across US equities (S&P-100) and crypto (BTCUSD, ETHUSD).
+
+## 🌟 Key Features
+
+- **🎯 Multi-Strategy Architecture**: 5 integrated strategies with conflict resolution and performance-based allocation
+- **🧠 Machine Learning**: XGBoost classifier with meta-labeling and PPO execution optimization  
+- **⚖️ Advanced Risk Management**: Kill-switch, volatility targeting, asset class caps, position sizing
+- **🔄 Continuous Learning**: Automated weekly retraining with drift detection and model promotion gates
+- **🌐 Live/Backtest Dual Mode**: Seamless switching between paper and live trading
+- **📊 Production Monitoring**: Discord alerts, comprehensive logging, performance tracking
+- **🛡️ Robust Architecture**: Type-safe configuration, broker adapters, comprehensive testing
 
 ## 📋 Changelog
 
-### v1.0.0 - Production Release
-- **Config System**: Added type-safe pydantic configuration with validation and backward compatibility
+### v2.0.0 - Production Release (Latest)
+- **🎯 Strategy Manager**: Complete signal aggregation with meta-labeling and conflict resolution
+- **⚖️ Enhanced Risk System**: Asset class caps, volatility targeting, sophisticated kill-switch with recovery
+- **🧠 ML Pipeline**: Complete training scripts with walk-forward validation and calibration
+- **🔄 Auto-Retraining**: GitHub Actions workflow with model evaluation and auto-PR creation
+- **🌐 Broker Adapters**: Portable interface for QuantConnect, Alpaca, IBKR compatibility
+- **📊 Production CI**: Security scanning, integration tests, comprehensive validation
+- **🛠️ Live Trading**: OnOrderEvent handling, proper consolidators, brokerage model detection
+
+### v1.0.0 - Initial Release
+- **Config System**: Type-safe pydantic configuration with validation and backward compatibility
 - **Bug Fixes**: Fixed trend_breakout momentum calculation UnboundLocalError 
 - **CI/CD**: Python 3.10+3.11 matrix testing with ruff, black, mypy, and pytest
-- **Training Scripts**: Offline classifier and PPO training with data fetching from yfinance/Binance
-- **LEAN Integration**: Added lean.json and deployment guides for QuantConnect
+- **Training Scripts**: Offline classifier and PPO training with data fetching
+- **LEAN Integration**: lean.json and deployment guides for QuantConnect
 - **Risk Management**: Discord alerts system for real-time notifications
-- **Git LFS**: Model file tracking with .gitattributes for joblib/pkl/zip files
-- **Documentation**: Complete setup guides for LEAN CLI and QuantConnect Cloud deployment
-- **Self-Audit**: Enhanced validation system using new config loader with comprehensive testing
+- **Git LFS**: Model file tracking for joblib/pkl/zip files
 
 ## 🚀 Quick Start
 
@@ -25,6 +43,8 @@ A sophisticated Python 3.11 quantitative trading bot for QuantConnect LEAN that 
 # Clone and install
 git clone https://github.com/KaholiK/quant-bot.git
 cd quant-bot
+python -m venv venv
+source venv/bin/activate  # or `venv\Scripts\activate` on Windows
 pip install -e .
 
 # Run self-audit to verify setup
@@ -33,14 +53,14 @@ python scripts/self_audit.py
 # Run tests
 pytest
 
-# Train models offline
-python scripts/train_classifier.py
-python scripts/train_ppo.py --skip-if-no-deps
+# Train models offline (optional)
+python scripts/train_classifier.py --config config.yaml
+python scripts/train_ppo.py --config config.yaml --skip-if-no-deps
 ```
 
 ## ⚙️ Configuration
 
-The bot uses a type-safe configuration system with pydantic validation:
+The bot uses a production-grade configuration system with full validation:
 
 ```yaml
 # config.yaml
@@ -48,6 +68,36 @@ trading:
   universe:
     equities: SP100
     crypto: [BTCUSD, ETHUSD]
+  bars:
+    equities: 30m
+    crypto: 15m
+  risk:
+    per_trade_risk_pct: 0.01
+    max_leverage: 2.0
+    single_name_max_pct: 0.10
+    sector_max_pct: 0.30
+    asset_class_caps: { crypto_max_gross_pct: 0.50 }
+    kill_switch_dd: 0.20
+    vol_target_ann: 0.12
+  models:
+    classifier_path: models/xgb_classifier.joblib
+    meta_model_path: models/meta_filter.joblib
+    rl_policy_path: policies/ppo_policy.zip
+  strategies:
+    scalper_sigma: {enabled: true}
+    trend_breakout: {enabled: true}
+    bull_mode: {enabled: true}
+    market_neutral: {enabled: false}
+    gamma_reversal: {enabled: false}
+  learning:
+    cv: {scheme: purged_kfold_embargo, folds: 5, embargo_frac: 0.02}
+    retrain_cadence: weekly
+    gates: {oos_sortino_min: 1.2, oos_profit_factor_min: 1.15, oos_max_dd_max: 0.06}
+  execution:
+    maker_ladder_offsets_atr: [0.10, 0.20, 0.30]
+    min_ms_between_orders: 300
+    min_hold_secs: 60
+```
   bars:
     equities: 30m
     crypto: 15m

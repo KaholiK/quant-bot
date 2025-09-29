@@ -349,33 +349,82 @@ class ExecutionRL:
                               size_delta: float,
                               market_features: Dict[str, float],
                               atr: float) -> Dict[str, Any]:
-        """Fallback execution strategy using maker ladder."""
+        """Fallback execution strategy using maker ladder with proper spacing."""
         spread = market_features.get('spread', 0.01)
         volatility = market_features.get('volatility', 0.2)
+        current_time = market_features.get('timestamp', 0)
         
         # Use market orders for small sizes or high volatility
         if abs(size_delta) < 100 or volatility > 0.3:
             return {
                 'size_delta': size_delta,
                 'order_type': 'market',
-                'limit_offset': 0.0
+                'limit_offset': 0.0,
+                'ladder_orders': []
             }
         
-        # Use limit orders with conservative offsets
-        offset_mult = np.random.choice(self.default_limit_offsets)
-        limit_offset = offset_mult * atr
+        # Create maker ladder orders
+        ladder_orders = []
+        total_size = abs(size_delta)
+        direction = 1 if size_delta > 0 else -1
         
-        # Reduce size for limit orders to increase fill probability
-        conservative_size = size_delta * 0.7
+        # Split size across ladder levels
+        ladder_sizes = self._split_size_for_ladder(total_size, len(self.default_limit_offsets))
         
-        logger.debug(f"Fallback execution decision: size_delta={conservative_size:.2f}, "
-                    f"type=limit, offset={limit_offset:.4f}")
+        for i, offset_mult in enumerate(self.default_limit_offsets):
+            if i >= len(ladder_sizes):
+                break
+                
+            limit_offset = offset_mult * atr * direction  # direction for buy/sell
+            ladder_size = ladder_sizes[i] * direction
+            
+            # Create idempotent order ID
+            order_id = f"ladder_{hash(f'{current_time}_{i}_{ladder_size}_{limit_offset}') % 1000000}"
+            
+            ladder_orders.append({
+                'size': ladder_size,
+                'limit_offset': limit_offset,
+                'order_id': order_id,
+                'level': i
+            })
+        
+        # Primary order is the first ladder level
+        primary_order = ladder_orders[0] if ladder_orders else {
+            'size': size_delta * 0.7,
+            'limit_offset': self.default_limit_offsets[0] * atr * direction,
+            'order_id': f"primary_{hash(f'{current_time}_{size_delta}') % 1000000}",
+            'level': 0
+        }
+        
+        logger.debug(f"Fallback maker ladder: {len(ladder_orders)} orders, "
+                    f"primary_size={primary_order['size']:.2f}, "
+                    f"offset={primary_order['limit_offset']:.4f}")
         
         return {
-            'size_delta': conservative_size,
-            'order_type': 'limit', 
-            'limit_offset': limit_offset
+            'size_delta': primary_order['size'],
+            'order_type': 'limit',
+            'limit_offset': primary_order['limit_offset'],
+            'ladder_orders': ladder_orders,
+            'order_id': primary_order['order_id']
         }
+    
+    def _split_size_for_ladder(self, total_size: float, num_levels: int) -> List[float]:
+        """Split total size across ladder levels with decreasing amounts."""
+        if num_levels <= 0:
+            return [total_size]
+        
+        # Geometric distribution: larger orders at better prices
+        weights = [1.0 / (2 ** i) for i in range(num_levels)]
+        total_weight = sum(weights)
+        
+        # Normalize weights and apply to total size
+        sizes = [(w / total_weight) * total_size for w in weights]
+        
+        # Ensure minimum order size
+        min_size = max(1.0, total_size * 0.01)  # At least 1% of total
+        sizes = [max(size, min_size) for size in sizes]
+        
+        return sizes
     
     def train_policy(self, 
                     training_data: Optional[pd.DataFrame] = None,

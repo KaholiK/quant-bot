@@ -36,14 +36,35 @@ class MainAlgo(QCAlgorithm):
     def Initialize(self):
         """Initialize the algorithm."""
         
-        # Set start/end dates and cash
-        self.SetStartDate(2020, 1, 1)
-        self.SetEndDate(2024, 1, 1)
-        self.SetCash(100000)
-        
         # Load configuration using new config loader
         self.config_obj = self._load_config()
         self.config = get_legacy_dict(self.config_obj)  # Legacy format for backward compatibility
+        
+        # Detect live vs backtest mode
+        self.is_live_mode = self.LiveMode
+        
+        # Set dates and cash based on mode
+        if not self.is_live_mode:
+            # Backtest mode
+            self.SetStartDate(2020, 1, 1)
+            self.SetEndDate(2024, 1, 1)
+            self.SetCash(100000)
+            
+            # Enable realistic fees and slippage for backtest
+            self.SetBrokerageModel(AlphaStreamsBrokerageModel())
+            
+            # Add realistic transaction costs
+            self.Settings.FreePortfolioValuePercentage = 0.05  # 5% buffer
+        else:
+            # Live mode - no end date
+            self.SetCash(100000)
+            self.Log("Running in LIVE mode - no end date set")
+            
+            # Set brokerage based on config
+            self._set_live_brokerage()
+        
+        # Set warmup period (needed for indicators)
+        self.SetWarmUp(timedelta(days=60))
         
         # Initialize core components
         self.feature_pipeline = FeaturePipeline(self.config)
@@ -68,6 +89,7 @@ class MainAlgo(QCAlgorithm):
         self.consolidators = {}
         self.features_data = {}
         self.price_data = {}
+        self.last_order_time = {}  # Track order timing for rate limiting
         
         self._setup_universe()
         
@@ -102,6 +124,102 @@ class MainAlgo(QCAlgorithm):
             self.Log(f"Failed to load config: {e}")
             # Return default configuration
             return load_config("nonexistent.yaml")  # Returns defaults
+    
+    def _set_live_brokerage(self):
+        """Set appropriate brokerage model for live trading."""
+        try:
+            # Set brokerage based on assets being traded
+            universe_config = self.config_obj.trading.universe
+            
+            # For equities, use Alpaca (if available) or default
+            if universe_config.equities:
+                try:
+                    # Try to use Alpaca for equities
+                    self.SetBrokerageModel(AlpacaBrokerageModel())
+                    self.Log("Using Alpaca brokerage for equities")
+                except:
+                    # Fallback to default
+                    self.Log("Alpaca not available, using default brokerage")
+            
+            # For crypto, try Binance/Coinbase
+            if universe_config.crypto:
+                try:
+                    # Note: This depends on QuantConnect's crypto broker support
+                    self.Log("Crypto trading configured - using default crypto brokerage")
+                except:
+                    self.Log("Crypto brokerage setup failed")
+                    
+        except Exception as e:
+            self.Log(f"Brokerage setup failed: {e}")
+    
+    def OnOrderEvent(self, orderEvent):
+        """Handle order events (fills, rejections, etc.)."""
+        try:
+            order = self.Transactions.GetOrderById(orderEvent.OrderId)
+            symbol = order.Symbol.Value
+            
+            if orderEvent.Status == OrderStatus.Filled:
+                # Handle filled orders
+                self._handle_order_fill(orderEvent, order)
+                
+            elif orderEvent.Status == OrderStatus.PartiallyFilled:
+                # Handle partial fills
+                self._handle_partial_fill(orderEvent, order)
+                
+            elif orderEvent.Status in [OrderStatus.Invalid, OrderStatus.Canceled]:
+                # Handle rejections/cancellations
+                self._handle_order_rejection(orderEvent, order)
+                
+        except Exception as e:
+            self.Log(f"Error handling order event: {e}")
+    
+    def _handle_order_fill(self, orderEvent, order):
+        """Handle completed order fills."""
+        symbol = order.Symbol.Value
+        fill_price = orderEvent.FillPrice
+        fill_quantity = orderEvent.FillQuantity
+        
+        # Update position tracking in strategies
+        for strategy in self.strategies.values():
+            if hasattr(strategy, 'update_position'):
+                strategy.update_position(symbol, fill_quantity, fill_price)
+        
+        # Update risk manager
+        self.risk_manager.update_position(symbol, fill_quantity, fill_price)
+        
+        # Send Discord alert
+        try:
+            from algos.core.alerts import send_fill_alert
+            side = "BUY" if fill_quantity > 0 else "SELL"
+            send_fill_alert(symbol, side, abs(fill_quantity), fill_price, "MainAlgo")
+        except Exception as e:
+            self.Log(f"Failed to send fill alert: {e}")
+        
+        self.Log(f"ORDER FILLED: {symbol} {fill_quantity} @ {fill_price}")
+    
+    def _handle_partial_fill(self, orderEvent, order):
+        """Handle partial order fills."""
+        symbol = order.Symbol.Value
+        fill_price = orderEvent.FillPrice
+        fill_quantity = orderEvent.FillQuantity
+        
+        self.Log(f"PARTIAL FILL: {symbol} {fill_quantity} @ {fill_price}")
+        
+        # Update positions with partial quantity
+        self._handle_order_fill(orderEvent, order)
+    
+    def _handle_order_rejection(self, orderEvent, order):
+        """Handle order rejections and cancellations."""
+        symbol = order.Symbol.Value
+        
+        self.Log(f"ORDER REJECTED/CANCELED: {symbol} - {orderEvent.Message}")
+        
+        # Send risk alert for rejections
+        try:
+            from algos.core.alerts import send_risk_alert
+            send_risk_alert("ORDER_REJECTION", f"Order rejected for {symbol}: {orderEvent.Message}")
+        except Exception as e:
+            self.Log(f"Failed to send rejection alert: {e}")
     
     def _load_models(self) -> Dict[str, Any]:
         """Load trained ML models."""
