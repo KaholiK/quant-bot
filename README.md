@@ -6,6 +6,19 @@
 
 A sophisticated Python 3.11 quantitative trading bot for QuantConnect LEAN that handles US equities (S&P-100) and crypto (BTCUSD, ETHUSD) with advanced machine learning, risk management, and multiple trading strategies.
 
+## 📋 Changelog
+
+### v1.0.0 - Production Release
+- **Config System**: Added type-safe pydantic configuration with validation and backward compatibility
+- **Bug Fixes**: Fixed trend_breakout momentum calculation UnboundLocalError 
+- **CI/CD**: Python 3.10+3.11 matrix testing with ruff, black, mypy, and pytest
+- **Training Scripts**: Offline classifier and PPO training with data fetching from yfinance/Binance
+- **LEAN Integration**: Added lean.json and deployment guides for QuantConnect
+- **Risk Management**: Discord alerts system for real-time notifications
+- **Git LFS**: Model file tracking with .gitattributes for joblib/pkl/zip files
+- **Documentation**: Complete setup guides for LEAN CLI and QuantConnect Cloud deployment
+- **Self-Audit**: Enhanced validation system using new config loader with comprehensive testing
+
 ## 🚀 Quick Start
 
 ```bash

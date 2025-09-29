@@ -9,6 +9,7 @@ Audit run on repository: /home/runner/work/quant-bot/quant-bot
 | Files | pyproject.toml | PASS |
 | Files | README.md | PASS |
 | Files | config.yaml | PASS |
+| Files | lean.json | PASS |
 | Files | MainAlgo.py | PASS |
 | Files | algos/core/feature_pipe.py | PASS |
 | Files | algos/core/labels.py | PASS |
@@ -23,14 +24,18 @@ Audit run on repository: /home/runner/work/quant-bot/quant-bot
 | Files | algos/strategies/gamma_reversal.py | PASS |
 | Files | notebooks/train_classifier.ipynb | PASS |
 | Files | notebooks/train_ppo.ipynb | PASS |
+| Files | tests/test_triple_barrier.py | PASS |
+| Files | tests/test_purged_cv.py | PASS |
+| Files | tests/test_risk_engine.py | PASS |
 | Files | tests/test_*.py | PASS |
-| Config | config.yaml syntax | PASS |
-| Config | key: trading.universe | PASS |
-| Config | key: trading.risk | PASS |
-| Config | key: trading.features | PASS |
-| Config | key: trading.labels | PASS |
-| Config | key: execution | PASS |
-| Config | key: models | PASS |
+| Config | config.yaml loads with new loader | PASS |
+| Config | trading section | PASS |
+| Config | trading.universe | PASS |
+| Config | trading.risk | PASS |
+| Config | risk.per_trade_risk_pct in range | PASS |
+| Config | risk.kill_switch_dd in range | PASS |
+| Config | trading.models | PASS |
+| Config | trading.strategies | PASS |
 | Imports | algos.core.feature_pipe | SKIP: Missing dependencies (expected in CI) |
 | Imports | algos.core.labels | SKIP: Missing dependencies (expected in CI) |
 | Imports | algos.core.cv_utils | SKIP: Missing dependencies (expected in CI) |
@@ -43,7 +48,7 @@ Audit run on repository: /home/runner/work/quant-bot/quant-bot
 | Imports | algos.strategies.market_neutral | SKIP: Missing dependencies (expected in CI) |
 | Imports | algos.strategies.gamma_reversal | SKIP: Missing dependencies (expected in CI) |
 
-**Total Tests:** 36  
-**Passed:** 25  
+**Total Tests:** 41  
+**Passed:** 30  
 **Failed:** 11  
-**Success Rate:** 69.4%  
+**Success Rate:** 73.2%  
