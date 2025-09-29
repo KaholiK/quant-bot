@@ -79,6 +79,18 @@ trading:
     asset_class_caps: { crypto_max_gross_pct: 0.50 }
     kill_switch_dd: 0.20
     vol_target_ann: 0.12
+  features:
+    returns_periods: [1, 5, 20, 60]
+    sma_periods: [20, 50, 200]
+    ema_periods: [12, 26]
+    macd_params: {fast: 12, slow: 26, signal: 9}
+    atr_period: 14
+    bollinger_period: 20
+    vol_window: 20
+  labels:
+    horizon_bars: 5
+    tp_atr_mult: 1.75
+    sl_atr_mult: 1.00
   models:
     classifier_path: models/xgb_classifier.joblib
     meta_model_path: models/meta_filter.joblib
@@ -93,30 +105,11 @@ trading:
     cv: {scheme: purged_kfold_embargo, folds: 5, embargo_frac: 0.02}
     retrain_cadence: weekly
     gates: {oos_sortino_min: 1.2, oos_profit_factor_min: 1.15, oos_max_dd_max: 0.06}
+    meta_threshold: 0.55
   execution:
     maker_ladder_offsets_atr: [0.10, 0.20, 0.30]
     min_ms_between_orders: 300
     min_hold_secs: 60
-```
-  bars:
-    equities: 30m
-    crypto: 15m
-  risk:
-    per_trade_risk_pct: 0.01  # 1% risk per trade (max 5%)
-    max_leverage: 2.0
-    single_name_max_pct: 0.10
-    sector_max_pct: 0.30
-    kill_switch_dd: 0.20  # 20% drawdown kill switch
-  models:
-    classifier_path: models/xgb_classifier.joblib
-    meta_model_path: models/meta_filter.joblib
-    rl_policy_path: policies/ppo_policy.zip
-  strategies:
-    scalper_sigma: {enabled: true}
-    trend_breakout: {enabled: true}
-    bull_mode: {enabled: true}
-    market_neutral: {enabled: false}
-    gamma_reversal: {enabled: false}
 ```
 
 ## 🚀 Features

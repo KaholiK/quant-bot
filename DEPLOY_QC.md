@@ -286,6 +286,63 @@ The bot includes several built-in risk controls:
    - Self-audit report for configuration issues
    - Discord alerts for runtime problems
 
+## Required Settings and Configuration
+
+### Brokerage Configuration
+
+When deploying to live trading, ensure your brokerage is properly configured:
+
+1. **Enable Fees and Slippage**: 
+   - Go to your algorithm settings in QuantConnect
+   - Ensure "Enable Fees" and "Enable Slippage" are checked
+   - This provides realistic backtesting and live trading performance
+
+2. **Market Impact Modeling**:
+   - Enable market impact simulation for realistic execution costs
+   - This helps the algorithm learn proper position sizing
+
+3. **Data Quality Settings**:
+   - Use high-quality data feeds for live trading
+   - Enable real-time data subscriptions for target symbols
+
+### Discord Notifications Setup
+
+To receive real-time alerts and notifications:
+
+1. **Create Discord Webhook**:
+   ```bash
+   # In your Discord server, go to:
+   # Server Settings > Integrations > Webhooks > New Webhook
+   # Copy the webhook URL
+   ```
+
+2. **Add to QuantConnect Environment**:
+   - In your QuantConnect project settings
+   - Add environment variable: `DISCORD_WEBHOOK_URL`
+   - Paste your webhook URL as the value
+
+3. **Notification Types**:
+   - Startup/shutdown alerts
+   - Trade executions
+   - Risk limit breaches
+   - Model retrain results
+   - Kill-switch activations
+
+### Meta-Learning Configuration
+
+The bot includes advanced meta-learning capabilities:
+
+1. **Meta-Threshold Setting**:
+   - Default: `learning.meta_threshold: 0.55`
+   - Controls how selective the meta-filter is
+   - Higher values = more selective (fewer but higher quality trades)
+   - Lower values = more permissive (more trades but potentially lower quality)
+
+2. **Features and Labels**:
+   - The system automatically generates technical features
+   - Labels use triple-barrier method with ATR-based stops
+   - All parameters configurable via `config.yaml`
+
 ## Best Practices
 
 1. **Start Small**: Begin with paper trading or small live amounts
