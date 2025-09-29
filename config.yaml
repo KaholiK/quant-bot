@@ -14,6 +14,18 @@ trading:
     asset_class_caps: { crypto_max_gross_pct: 0.50 }
     kill_switch_dd: 0.20
     vol_target_ann: 0.12
+  features:
+    returns_periods: [1, 5, 20, 60]
+    sma_periods: [20, 50, 200]
+    ema_periods: [12, 26]
+    macd_params: {fast: 12, slow: 26, signal: 9}
+    atr_period: 14
+    bollinger_period: 20
+    vol_window: 20
+  labels:
+    horizon_bars: 5
+    tp_atr_mult: 1.75
+    sl_atr_mult: 1.00
   models:
     classifier_path: models/xgb_classifier.joblib
     meta_model_path: models/meta_filter.joblib
@@ -28,6 +40,7 @@ trading:
     cv: {scheme: purged_kfold_embargo, folds: 5, embargo_frac: 0.02}
     retrain_cadence: weekly
     gates: {oos_sortino_min: 1.2, oos_profit_factor_min: 1.15, oos_max_dd_max: 0.06}
+    meta_threshold: 0.55
   execution:
     maker_ladder_offsets_atr: [0.10, 0.20, 0.30]
     min_ms_between_orders: 300

@@ -237,6 +237,9 @@ class ExecutionRL:
         # Fallback parameters
         self.default_limit_offsets = config.get('execution', {}).get('default_limit_offsets', [0.1, 0.2, 0.3])
         
+        # Vector environment flag for training
+        self.use_vector_env = config.get('execution', {}).get('use_vector_env', True)
+        
         # Load or create policy
         self.policy: Optional[PPO] = None
         self.env: Optional[TradingExecutionEnv] = None
@@ -246,7 +249,7 @@ class ExecutionRL:
         self.pending_orders: Dict[str, Dict] = {}
         self.execution_history: List[Dict] = []
         
-        logger.info(f"Execution RL initialized with policy: {self.model_path}")
+        logger.info(f"Execution RL initialized with policy: {self.model_path}, vector_env: {self.use_vector_env}")
     
     def _load_policy(self):
         """Load trained PPO policy or use fallback."""
@@ -268,7 +271,7 @@ class ExecutionRL:
                              market_features: Dict[str, float],
                              atr: float) -> Dict[str, Any]:
         """
-        Get execution decision from RL policy or fallback.
+        Get execution decision from RL policy or fallback maker ladder.
         
         Args:
             symbol: Trading symbol
@@ -292,10 +295,30 @@ class ExecutionRL:
                 'limit_offset': 0.0
             }
         
-        if self.policy is not None:
-            return self._get_rl_decision(size_delta, market_features, atr)
-        else:
-            return self._get_fallback_decision(size_delta, market_features, atr)
+        # Guards: if no policy or policy error or out-of-range observation → return fallback
+        if self.policy is None:
+            logger.debug("No RL policy available, using fallback maker ladder")
+            return self._get_fallback_maker_ladder_decision(size_delta, market_features, atr)
+        
+        try:
+            # Attempt RL decision with additional guards
+            rl_decision = self._get_rl_decision(size_delta, market_features, atr)
+            
+            # Validate RL decision bounds
+            max_size_delta = self.config.get('execution', {}).get('max_size_delta', 10000.0)
+            max_limit_offset = self.config.get('execution', {}).get('max_limit_offset_atr', 0.5) * atr
+            
+            # Clamp limit_offset and size_delta to config bounds
+            rl_decision['limit_offset'] = np.clip(rl_decision['limit_offset'], 
+                                                 -max_limit_offset, max_limit_offset)
+            rl_decision['size_delta'] = np.clip(rl_decision['size_delta'], 
+                                               -max_size_delta, max_size_delta)
+            
+            return rl_decision
+            
+        except Exception as e:
+            logger.warning(f"RL policy error for {symbol}: {e}. Using fallback maker ladder.")
+            return self._get_fallback_maker_ladder_decision(size_delta, market_features, atr)
     
     def _get_rl_decision(self, 
                         size_delta: float,
@@ -345,6 +368,32 @@ class ExecutionRL:
             logger.warning(f"RL policy prediction failed: {e}. Using fallback.")
             return self._get_fallback_decision(size_delta, market_features, atr)
     
+    def _get_fallback_maker_ladder_decision(self, 
+                                           size_delta: float,
+                                           market_features: Dict[str, float],
+                                           atr: float) -> Dict[str, Any]:
+        """Fallback maker ladder execution strategy."""
+        spread = market_features.get('spread', 0.01)
+        volatility = market_features.get('volatility', 0.2)
+        
+        # Use market orders for small sizes or high volatility
+        if abs(size_delta) < 100 or volatility > 0.3:
+            return {
+                'size_delta': size_delta,
+                'order_type': 'market',
+                'limit_offset': 0.0
+            }
+        
+        # Use first level of maker ladder for limit orders
+        direction = 1 if size_delta > 0 else -1
+        limit_offset = self.default_limit_offsets[0] * atr * direction
+        
+        return {
+            'size_delta': size_delta,
+            'order_type': 'limit',
+            'limit_offset': limit_offset
+        }
+
     def _get_fallback_decision(self, 
                               size_delta: float,
                               market_features: Dict[str, float],

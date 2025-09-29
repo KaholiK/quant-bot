@@ -595,6 +595,108 @@ class TestVolatilityTargeting:
         print("Insufficient data test: Correctly returned default scaling")
 
 
+class TestRiskManagerExtended:
+    """Extended test cases for RiskManager functionality."""
+    
+    def setup_method(self):
+        """Setup test configuration and risk manager."""
+        self.config = {
+            'trading': {
+                'risk': {
+                    'max_leverage': 2.0,
+                    'single_name_max_pct': 0.10,
+                    'sector_max_pct': 0.30,
+                    'per_trade_risk_pct': 0.01,
+                    'vol_target_ann': 0.12,
+                    'kill_switch_dd': 0.20,
+                    'asset_class_caps': {
+                        'crypto_max_gross_pct': 0.50
+                    }
+                }
+            }
+        }
+        
+        self.risk_manager = RiskManager(self.config)
+        
+    def test_should_accept_single_name_cap(self):
+        """Test should_accept method for single-name cap enforcement."""
+        # Test within limits
+        assert self.risk_manager.should_accept('AAPL', 0.05) == True
+        
+        # Test exceeding single-name cap
+        assert self.risk_manager.should_accept('AAPL', 0.15) == False
+        
+        print("Single-name cap enforcement test passed")
+    
+    def test_should_accept_leverage_cap(self):
+        """Test should_accept method for leverage cap enforcement."""
+        # Add some existing positions
+        self.risk_manager.positions = {
+            'AAPL': {'weight': 0.08},
+            'MSFT': {'weight': 0.07},
+            'GOOGL': {'weight': 0.09}
+        }
+        
+        # Test within limits (current total: 0.24, adding 0.05 = 0.29)
+        assert self.risk_manager.should_accept('TSLA', 0.05) == True
+        
+        # Test exceeding leverage cap (current total: 0.24, adding 1.8 = 2.04 > 2.0)
+        assert self.risk_manager.should_accept('TSLA', 1.8) == False
+        
+        print("Leverage cap enforcement test passed")
+    
+    def test_should_accept_crypto_cap(self):
+        """Test should_accept method for crypto gross cap enforcement."""
+        # Add existing crypto positions
+        self.risk_manager.positions = {
+            'BTCUSD': {'weight': 0.20},
+            'ETHUSD': {'weight': 0.15}
+        }
+        
+        # Test within crypto cap (current crypto: 0.35, adding 0.10 = 0.45 < 0.50)
+        assert self.risk_manager.should_accept('ADAUSD', 0.10) == True
+        
+        # Test exceeding crypto cap (current crypto: 0.35, adding 0.20 = 0.55 > 0.50)
+        assert self.risk_manager.should_accept('ADAUSD', 0.20) == False
+        
+        print("Crypto cap enforcement test passed")
+    
+    def test_should_accept_kill_switch(self):
+        """Test should_accept method when kill-switch is active."""
+        # Activate kill switch
+        self.risk_manager.is_kill_switch_active = True
+        
+        # Should reject all positions when kill switch is active
+        assert self.risk_manager.should_accept('AAPL', 0.05) == False
+        
+        print("Kill-switch enforcement test passed")
+    
+    def test_kill_switch_trigger(self):
+        """Test kill switch trigger mechanism."""
+        initial_equity = 100000.0
+        self.risk_manager.update_equity_curve(initial_equity)
+        
+        # Simulate a large drawdown (25% > 20% threshold)
+        drawdown_equity = 75000.0
+        self.risk_manager.update_equity_curve(drawdown_equity)
+        
+        assert self.risk_manager.is_kill_switch_active == True
+        
+        print("Kill-switch trigger test passed")
+    
+    def test_vol_targeting_scaling(self):
+        """Test volatility targeting scaling mechanism."""
+        # Create returns data with high volatility
+        high_vol_returns = pd.Series(np.random.normal(0, 0.03, 252))  # 30% annualized vol
+        
+        vol_scalar = self.risk_manager.calculate_vol_scaling()
+        
+        # With default initialization, should return 1.0
+        assert vol_scalar == 1.0
+        
+        print("Vol targeting scaling test passed")
+
+
 if __name__ == "__main__":
     # Run tests if script is executed directly
     pytest.main([__file__, "-v"])

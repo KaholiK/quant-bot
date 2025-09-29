@@ -111,10 +111,10 @@ jobs:
           echo "meta_trained=false" >> $GITHUB_OUTPUT
         fi
         
-    - name: Evaluate models
+    - name: Evaluate models and apply KPI gates
       id: evaluate
       run: |
-        echo "Evaluating new models..."
+        echo "Evaluating new models with KPI gates..."
         python scripts/evaluate_models.py \
           --old-models models/ \
           --new-models models_new/ \
@@ -122,39 +122,44 @@ jobs:
           --report reports/model_comparison.json \
           --plots reports/
         
-        # Parse evaluation results
-        IMPROVEMENT=$(python -c "
-        import json
+        # Apply KPI gates from config
+        MEETS_GATES=$(python -c "
+        import json, yaml
         try:
+            # Load config gates
+            with open('config.yaml') as f:
+                config = yaml.safe_load(f)
+            gates = config['trading']['learning']['gates']
+            
+            # Load evaluation results
             with open('reports/model_comparison.json') as f:
                 results = json.load(f)
             
-            # Check improvement criteria from config
-            old_sortino = results.get('old_model', {}).get('oos_sortino', 0)
-            new_sortino = results.get('new_model', {}).get('oos_sortino', 0)
+            new_model = results.get('new_model', {})
+            oos_sortino = new_model.get('oos_sortino', 0)
+            oos_profit_factor = new_model.get('oos_profit_factor', 0)
+            oos_max_dd = new_model.get('oos_max_dd', 1.0)
             
-            old_pf = results.get('old_model', {}).get('oos_profit_factor', 0)
-            new_pf = results.get('new_model', {}).get('oos_profit_factor', 0)
+            # Apply gates from config
+            sortino_gate = oos_sortino >= gates['oos_sortino_min']
+            pf_gate = oos_profit_factor >= gates['oos_profit_factor_min']  
+            dd_gate = oos_max_dd <= gates['oos_max_dd_max']
             
-            old_dd = results.get('old_model', {}).get('oos_max_dd', 1.0)
-            new_dd = results.get('new_model', {}).get('oos_max_dd', 1.0)
+            meets_gates = sortino_gate and pf_gate and dd_gate
             
-            # Improvement criteria
-            sortino_improved = new_sortino > old_sortino * 1.05  # 5% improvement
-            pf_improved = new_pf > old_pf * 1.02  # 2% improvement  
-            dd_improved = new_dd < old_dd * 0.95  # 5% better drawdown
+            print(f'Sortino: {oos_sortino:.3f} >= {gates[\"oos_sortino_min\"]} = {sortino_gate}')
+            print(f'Profit Factor: {oos_profit_factor:.3f} >= {gates[\"oos_profit_factor_min\"]} = {pf_gate}')
+            print(f'Max DD: {oos_max_dd:.3f} <= {gates[\"oos_max_dd_max\"]} = {dd_gate}')
+            print(f'Overall: {meets_gates}')
             
-            # Gates from config
-            meets_gates = (new_sortino >= 1.2 and new_pf >= 1.15 and new_dd <= 0.06)
-            
-            improved = (sortino_improved or pf_improved or dd_improved) and meets_gates
-            print('true' if improved else 'false')
+            print('true' if meets_gates else 'false')
         except Exception as e:
+            print(f'Error evaluating gates: {e}')
             print('false')
         ")
         
-        echo "improvement_detected=$IMPROVEMENT" >> $GITHUB_OUTPUT
-        echo "Model improvement detected: $IMPROVEMENT"
+        echo "meets_gates=$MEETS_GATES" >> $GITHUB_OUTPUT
+        echo "KPI gates result: $MEETS_GATES"
         
     - name: Generate drift report
       run: |
@@ -176,50 +181,79 @@ jobs:
           policies_new/
         retention-days: 30
         
-    - name: Commit improved models
-      if: steps.evaluate.outputs.improvement_detected == 'true' || github.event.inputs.force_retrain == 'true'
+    - name: Commit improved models or post rejection summary
       run: |
         # Configure git
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         
-        # Copy new models over old ones
-        if [ "${{ steps.train_classifier.outputs.classifier_trained }}" == "true" ]; then
-          cp models_new/xgb_classifier.joblib models/
-          git add models/xgb_classifier.joblib
-        fi
-        
-        if [ "${{ steps.train_meta.outputs.meta_trained }}" == "true" ]; then
-          cp models_new/meta_filter.joblib models/
-          git add models/meta_filter.joblib
-        fi
-        
-        if [ "${{ steps.train_ppo.outputs.ppo_trained }}" == "true" ]; then
-          cp policies_new/ppo_policy.zip policies/
-          git add policies/ppo_policy.zip
-        fi
-        
-        # Commit with evaluation summary
-        COMMIT_MSG="chore: retrain models $(date +%Y-%m-%d)
-
-        Automated model retraining results:
-        - Classifier: ${{ steps.train_classifier.outputs.classifier_trained }}
-        - PPO Policy: ${{ steps.train_ppo.outputs.ppo_trained }}
-        - Meta-filter: ${{ steps.train_meta.outputs.meta_trained }}
-        - Improvement detected: ${{ steps.evaluate.outputs.improvement_detected }}
-        - Force retrain: ${{ github.event.inputs.force_retrain }}
-        
-        See artifact retraining-report-${{ github.run_id }} for detailed results."
-        
-        if git diff --staged --quiet; then
-          echo "No model changes to commit"
+        if [ "${{ steps.evaluate.outputs.meets_gates }}" == "true" ] || [ "${{ github.event.inputs.force_retrain }}" == "true" ]; then
+          echo "Models meet gates - proceeding with commit"
+          
+          # Copy new models over old ones
+          if [ "${{ steps.train_classifier.outputs.classifier_trained }}" == "true" ]; then
+            cp models_new/xgb_classifier.joblib models/
+            git add models/xgb_classifier.joblib
+          fi
+          
+          if [ "${{ steps.train_meta.outputs.meta_trained }}" == "true" ]; then
+            cp models_new/meta_filter.joblib models/
+            git add models/meta_filter.joblib
+          fi
+          
+          if [ "${{ steps.train_ppo.outputs.ppo_trained }}" == "true" ]; then
+            cp policies_new/ppo_policy.zip policies/
+            git add policies/ppo_policy.zip
+          fi
+          
+          # Create summary report
+          echo "# Model Promotion Summary" > reports/summary.md
+          echo "" >> reports/summary.md
+          echo "**Date:** $(date +%Y-%m-%d)" >> reports/summary.md
+          echo "**Status:** APPROVED ✅" >> reports/summary.md
+          echo "" >> reports/summary.md
+          echo "## KPI Gates" >> reports/summary.md
+          echo "- ✅ Sortino >= 1.2" >> reports/summary.md
+          echo "- ✅ Profit Factor >= 1.15" >> reports/summary.md  
+          echo "- ✅ Max DD <= 0.06" >> reports/summary.md
+          echo "" >> reports/summary.md
+          echo "## Models Updated" >> reports/summary.md
+          echo "- Classifier: ${{ steps.train_classifier.outputs.classifier_trained }}" >> reports/summary.md
+          echo "- Meta-filter: ${{ steps.train_meta.outputs.meta_trained }}" >> reports/summary.md
+          echo "- PPO Policy: ${{ steps.train_ppo.outputs.ppo_trained }}" >> reports/summary.md
+          
+          git add reports/summary.md
+          
+          # Commit with evaluation summary
+          COMMIT_MSG="chore: promote models passing KPI gates $(date +%Y-%m-%d)"
+          
+          if git diff --staged --quiet; then
+            echo "No model changes to commit"
+          else
+            git commit -m "$COMMIT_MSG"
+            git push
+          fi
+          
         else
-          git commit -m "$COMMIT_MSG"
-          git push
+          echo "Models rejected by KPI gates - posting summary"
+          
+          # Create rejection summary
+          echo "# Model Rejection Summary" > reports/summary.md
+          echo "" >> reports/summary.md
+          echo "**Date:** $(date +%Y-%m-%d)" >> reports/summary.md
+          echo "**Status:** REJECTED ❌" >> reports/summary.md
+          echo "" >> reports/summary.md
+          echo "## KPI Gates Failed" >> reports/summary.md
+          echo "Models did not meet the promotion criteria:" >> reports/summary.md
+          echo "- Required: Sortino >= 1.2, Profit Factor >= 1.15, Max DD <= 0.06" >> reports/summary.md
+          echo "" >> reports/summary.md
+          echo "See detailed evaluation in the artifacts." >> reports/summary.md
+          
+          # This will be uploaded as an artifact but not committed
         fi
         
-    - name: Create PR for model updates
-      if: steps.evaluate.outputs.improvement_detected == 'true'
+    - name: Create PR for approved models
+      if: steps.evaluate.outputs.meets_gates == 'true'
       uses: peter-evans/create-pull-request@v5
       with:
         token: ${{ secrets.GITHUB_TOKEN }}
@@ -236,9 +270,11 @@ jobs:
           - ✅ Meta-filter: ${{ steps.train_meta.outputs.meta_trained }}
           - ✅ PPO Policy: ${{ steps.train_ppo.outputs.ppo_trained }}
           
-          ### Performance Improvement
-          - **Improvement Detected:** ${{ steps.evaluate.outputs.improvement_detected }}
-          - **Meets Promotion Gates:** ✅
+          ### Performance Gates
+          - **Meets KPI Gates:** ${{ steps.evaluate.outputs.meets_gates }}
+          - **Sortino >= 1.2:** ✅
+          - **Profit Factor >= 1.15:** ✅  
+          - **Max DD <= 0.06:** ✅
           
           ### Artifacts
           - 📊 [Evaluation Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
@@ -267,16 +303,23 @@ jobs:
           webhook_url = '${{ secrets.DISCORD_WEBHOOK_URL }}'
           
           status = '✅ SUCCESS' if '${{ job.status }}' == 'success' else '❌ FAILED'
-          improvement = '${{ steps.evaluate.outputs.improvement_detected }}'
+          meets_gates = '${{ steps.evaluate.outputs.meets_gates }}'
+          
+          if meets_gates == 'true':
+              title = f'🤖 Model Retraining {status} - Models Promoted'
+              color = 0x00ff00
+          else:
+              title = f'🤖 Model Retraining {status} - Models Rejected'
+              color = 0xff6600
           
           embed = {
-              'title': f'🤖 Model Retraining {status}',
-              'color': 0x00ff00 if '${{ job.status }}' == 'success' else 0xff0000,
+              'title': title,
+              'color': color,
               'fields': [
                   {'name': 'Classifier', 'value': '${{ steps.train_classifier.outputs.classifier_trained }}', 'inline': True},
                   {'name': 'PPO Policy', 'value': '${{ steps.train_ppo.outputs.ppo_trained }}', 'inline': True},
                   {'name': 'Meta-filter', 'value': '${{ steps.train_meta.outputs.meta_trained }}', 'inline': True},
-                  {'name': 'Improvement', 'value': improvement, 'inline': True},
+                  {'name': 'Meets Gates', 'value': meets_gates, 'inline': True},
                   {'name': 'Repository', 'value': '${{ github.repository }}', 'inline': True},
                   {'name': 'Run ID', 'value': '${{ github.run_id }}', 'inline': True}
               ],

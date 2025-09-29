@@ -59,6 +59,27 @@ class StrategiesConfig(BaseModel):
     gamma_reversal: StrategyConfig = StrategyConfig(enabled=False)
 
 
+class FeaturesConfig(BaseModel):
+    """Feature engineering configuration."""
+    returns_periods: List[int] = Field(default=[1, 5, 20, 60], description="Return calculation periods")
+    sma_periods: List[int] = Field(default=[20, 50, 200], description="Simple moving average periods")
+    ema_periods: List[int] = Field(default=[12, 26], description="Exponential moving average periods")
+    macd_params: Dict[str, int] = Field(
+        default={"fast": 12, "slow": 26, "signal": 9}, 
+        description="MACD parameters"
+    )
+    atr_period: int = Field(default=14, description="ATR calculation period")
+    bollinger_period: int = Field(default=20, description="Bollinger bands period")
+    vol_window: int = Field(default=20, description="Volatility calculation window")
+
+
+class LabelsConfig(BaseModel):
+    """Label generation configuration."""
+    horizon_bars: int = Field(default=5, description="Label horizon in bars")
+    tp_atr_mult: float = Field(default=1.75, description="Take profit ATR multiplier")
+    sl_atr_mult: float = Field(default=1.00, description="Stop loss ATR multiplier")
+
+
 class LearningConfig(BaseModel):
     """Machine learning configuration."""
     cv: Dict[str, Any] = Field(
@@ -78,6 +99,7 @@ class LearningConfig(BaseModel):
         },
         description="Model promotion gates"
     )
+    meta_threshold: float = Field(default=0.55, description="Meta-model probability threshold")
 
 
 class ExecutionConfig(BaseModel):
@@ -88,6 +110,7 @@ class ExecutionConfig(BaseModel):
     )
     min_ms_between_orders: int = Field(default=300, ge=50, description="Minimum milliseconds between orders")
     min_hold_secs: int = Field(default=60, ge=1, description="Minimum hold time in seconds")
+    use_vector_env: bool = Field(default=True, description="Use vectorized environment for RL training")
 
 
 class TradingConfig(BaseModel):
@@ -99,6 +122,8 @@ class TradingConfig(BaseModel):
     strategies: StrategiesConfig = StrategiesConfig()
     learning: LearningConfig = LearningConfig()
     execution: ExecutionConfig = ExecutionConfig()
+    features: FeaturesConfig = FeaturesConfig()
+    labels: LabelsConfig = LabelsConfig()
 
 
 class QuantBotConfig(BaseModel):
