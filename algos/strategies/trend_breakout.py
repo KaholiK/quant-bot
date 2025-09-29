@@ -226,10 +226,16 @@ class TrendBreakoutStrategy:
             lookback = min(len(price_data), 63)  # ~3 months of daily data
             if lookback < 20:
                 logger.debug(f"Insufficient data for momentum calculation: {symbol} (lookback={lookback})")
+                self.momentum_ranks[symbol] = 0.0
                 return 0
                 
-            # Only set symbol_momentum after successful calculation
+            # Calculate symbol momentum with proper error handling
             symbol_momentum = self._calculate_momentum(price_data, lookback)
+            
+            # Guard against non-finite values
+            if not np.isfinite(symbol_momentum):
+                logger.debug(f"Non-finite momentum for {symbol}: {symbol_momentum}")
+                symbol_momentum = 0.0
             
             # Calculate momentum for all symbols in universe
             momentum_scores = {}
@@ -237,7 +243,11 @@ class TrendBreakoutStrategy:
                 try:
                     if len(other_data) >= lookback:
                         other_momentum = self._calculate_momentum(other_data, lookback)
-                        momentum_scores[other_symbol] = other_momentum
+                        # Guard against non-finite values
+                        if np.isfinite(other_momentum):
+                            momentum_scores[other_symbol] = other_momentum
+                        else:
+                            logger.debug(f"Non-finite momentum for {other_symbol}: {other_momentum}")
                     else:
                         logger.debug(f"Skipping {other_symbol}: insufficient data (len={len(other_data)})")
                 except Exception as e:
@@ -247,13 +257,19 @@ class TrendBreakoutStrategy:
             # Add current symbol
             momentum_scores[symbol] = symbol_momentum
             
+            # Ensure we have at least some symbols to rank
+            if len(momentum_scores) < 2:
+                logger.debug(f"Insufficient symbols for momentum ranking: {len(momentum_scores)}")
+                self.momentum_ranks[symbol] = 0.0
+                return 0
+            
             # Rank symbols by momentum
             sorted_symbols = sorted(momentum_scores.items(), key=lambda x: x[1], reverse=True)
             total_symbols = len(sorted_symbols)
             
             # Find rank of current symbol
-            symbol_rank = next(i for i, (s, _) in enumerate(sorted_symbols) if s == symbol)
-            rank_percentile = symbol_rank / total_symbols
+            symbol_rank = next((i for i, (s, _) in enumerate(sorted_symbols) if s == symbol), total_symbols // 2)
+            rank_percentile = symbol_rank / total_symbols if total_symbols > 0 else 0.5
             
             # Store rank for reference
             self.momentum_ranks[symbol] = 1.0 - rank_percentile
@@ -269,8 +285,7 @@ class TrendBreakoutStrategy:
         except Exception as e:
             logger.debug(f"Momentum calculation failed for {symbol}: {e}")
             # symbol_momentum is already initialized to 0.0, safe to use
-            if symbol_momentum != 0.0:
-                self.momentum_ranks[symbol] = 0.0  # Set neutral rank on error
+            self.momentum_ranks[symbol] = 0.0  # Set neutral rank on error
             return 0
     
     def _calculate_momentum(self, price_data: pd.DataFrame, lookback: int) -> float:

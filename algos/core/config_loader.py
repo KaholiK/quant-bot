@@ -30,7 +30,12 @@ class RiskConfig(BaseModel):
     max_leverage: float = Field(default=2.0, ge=1.0, le=10.0, description="Maximum leverage")
     single_name_max_pct: float = Field(default=0.10, ge=0.01, le=0.50, description="Max position per symbol")
     sector_max_pct: float = Field(default=0.30, ge=0.05, le=1.0, description="Max exposure per sector")
+    asset_class_caps: Dict[str, float] = Field(
+        default={"crypto_max_gross_pct": 0.50}, 
+        description="Asset class exposure caps"
+    )
     kill_switch_dd: float = Field(default=0.20, gt=0.0, le=0.5, description="Kill switch drawdown threshold")
+    vol_target_ann: float = Field(default=0.12, gt=0.01, le=1.0, description="Volatility target (annualized)")
 
 
 class ModelsConfig(BaseModel):
@@ -65,6 +70,14 @@ class LearningConfig(BaseModel):
         description="Cross-validation configuration"
     )
     retrain_cadence: str = Field(default="weekly", description="Model retraining frequency")
+    gates: Dict[str, float] = Field(
+        default={
+            "oos_sortino_min": 1.2,
+            "oos_profit_factor_min": 1.15, 
+            "oos_max_dd_max": 0.06
+        },
+        description="Model promotion gates"
+    )
 
 
 class ExecutionConfig(BaseModel):
@@ -74,6 +87,7 @@ class ExecutionConfig(BaseModel):
         description="Maker ladder offsets in ATR units"
     )
     min_ms_between_orders: int = Field(default=300, ge=50, description="Minimum milliseconds between orders")
+    min_hold_secs: int = Field(default=60, ge=1, description="Minimum hold time in seconds")
 
 
 class TradingConfig(BaseModel):
