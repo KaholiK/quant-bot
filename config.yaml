@@ -2,96 +2,50 @@
 trading:
   # Universe configuration
   universe:
-    equities:
-      - symbols: "SPY_constituents_top100"  # S&P-100 stocks
-      - resolution: "ThirtyMinute"
-      - start_date: "2020-01-01"
-    crypto:
-      - symbols: ["BTCUSD", "ETHUSD"]
-      - resolution: "FifteenMinute"
-      - start_date: "2021-01-01"
-      - micro_resolution: "OneMinute"  # For gamma reversal strategy
+    equities: SP100  # S&P-100 stocks
+    crypto: [BTCUSD, ETHUSD]
+  
+  # Bar timeframes
+  bars:
+    equities: 30m
+    crypto: 15m
   
   # Risk management
   risk:
+    per_trade_risk_pct: 0.01  # 1% risk per trade
     max_leverage: 2.0
-    max_position_pct: 0.10  # 10% max per position
-    max_sector_pct: 0.30    # 30% max per sector
-    risk_pct_per_trade: 0.01  # 1% risk per trade
-    vol_target: 0.12        # 12% annualized volatility target
+    single_name_max_pct: 0.10  # 10% max per position
+    sector_max_pct: 0.30    # 30% max per sector
     kill_switch_dd: 0.20    # 20% drawdown kill switch
     
-  # Feature engineering
-  features:
-    returns_periods: [1, 5, 20, 60]
-    sma_periods: [20, 50, 200]
-    ema_periods: [12, 26]
-    macd_params: [12, 26, 9]
-    atr_period: 14
-    bollinger_period: 20
-    vol_window: 20
-    
-  # Triple barrier labeling
-  labels:
-    profit_take_mult: 1.75    # 1.75 x ATR
-    stop_loss_mult: 1.0       # 1.0 x ATR
-    horizon_bars: 5
-    
+  # Model paths
+  models:
+    classifier_path: models/xgb_classifier.joblib
+    meta_model_path: models/meta_filter.joblib
+    rl_policy_path: policies/ppo_policy.zip
+  
   # Strategy parameters
   strategies:
     scalper_sigma:
       enabled: true
-      stop_mult: 1.0
-      take_profit_mult: [0.75, 1.0]  # Partial TPs
-      min_hold_seconds: 30
-      order_spacing_atr: 0.1
-      
     trend_breakout:
       enabled: true
-      lookback_bars: 55
-      momentum_rank_pct: 0.30  # Top 30%
-      rsi_threshold: 80
-      momentum_timeframe: "3m"
-      
     bull_mode:
       enabled: true
-      sma_bull_condition: [50, 200]  # SMA50 > SMA200
-      vol_threshold: 0.15  # Low realized vol
-      
     market_neutral:
-      enabled: true
-      z_score_entry: 2.0
-      z_score_exit: 0.0
-      cointegration_window: 252
-      
+      enabled: false
     gamma_reversal:
-      enabled: true
-      timeframes: ["1m", "5m"]
-      take_profit_mult: [0.5, 0.75]
-      stop_loss_mult: 0.5
-      min_hold_seconds: 60
-      
-# Model paths
-models:
-  classifier_path: "models/xgb.pkl"
-  meta_model_path: "models/meta.pkl"
-  ppo_policy_path: "policies/ppo_policy.zip"
+      enabled: false
   
-# Execution settings
-execution:
-  default_limit_offsets: [0.1, 0.2, 0.3]  # Fallback maker ladder
-  slippage_model: "VolumeShareSlippageModel"
-  transaction_fee: 0.005  # 0.5 bps
+  # Learning configuration
+  learning:
+    cv:
+      scheme: purged_kfold_embargo
+      folds: 5
+      embargo_frac: 0.02
+    retrain_cadence: weekly
   
-# Logging and monitoring
-logging:
-  level: "INFO"
-  structured_logs: true
-  discord_webhook_enabled: false  # Set via DISCORD_WEBHOOK_URL env var
-  
-# Cross-validation
-cv:
-  embargo_frac: 0.02
-  n_splits: 5
-  train_months: 24
-  test_months: 3
+  # Execution settings
+  execution:
+    maker_ladder_offsets_atr: [0.10, 0.20, 0.30]
+    min_ms_between_orders: 300

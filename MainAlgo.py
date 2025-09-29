@@ -21,6 +21,8 @@ from algos.core.labels import TripleBarrierLabeler
 from algos.core.risk import RiskManager  
 from algos.core.portfolio import Portfolio, HRPOptimizer, VolatilityTargeting
 from algos.core.exec_rl import ExecutionRL
+from algos.core.config_loader import load_config, get_legacy_dict
+from algos.core.alerts import send_startup_alert
 from algos.strategies.scalper_sigma import ScalperSigmaStrategy
 from algos.strategies.trend_breakout import TrendBreakoutStrategy
 from algos.strategies.bull_mode import BullModeStrategy
@@ -39,8 +41,9 @@ class MainAlgo(QCAlgorithm):
         self.SetEndDate(2024, 1, 1)
         self.SetCash(100000)
         
-        # Load configuration
-        self.config = self._load_config()
+        # Load configuration using new config loader
+        self.config_obj = self._load_config()
+        self.config = get_legacy_dict(self.config_obj)  # Legacy format for backward compatibility
         
         # Initialize core components
         self.feature_pipeline = FeaturePipeline(self.config)
@@ -81,67 +84,39 @@ class MainAlgo(QCAlgorithm):
         )
         
         self.Log("MainAlgo initialized successfully")
+        
+        # Send startup alert to Discord
+        try:
+            send_startup_alert("1.0.0")
+        except Exception as e:
+            self.Log(f"Failed to send startup alert: {e}")
     
-    def _load_config(self) -> Dict[str, Any]:
-        """Load configuration from config.yaml."""
+    def _load_config(self):
+        """Load configuration using new config loader."""
         try:
             config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            self.Log("Configuration loaded successfully")
-            return config
+            config_obj = load_config(config_path)
+            self.Log("Configuration loaded and validated successfully")
+            return config_obj
         except Exception as e:
             self.Log(f"Failed to load config: {e}")
             # Return default configuration
-            return self._get_default_config()
-    
-    def _get_default_config(self) -> Dict[str, Any]:
-        """Return default configuration if config.yaml not found."""
-        return {
-            'trading': {
-                'universe': {
-                    'equities': {'resolution': 'ThirtyMinute'},
-                    'crypto': {'symbols': ['BTCUSD', 'ETHUSD'], 'resolution': 'FifteenMinute'}
-                },
-                'risk': {
-                    'max_leverage': 2.0,
-                    'max_position_pct': 0.10,
-                    'risk_pct_per_trade': 0.01,
-                    'kill_switch_dd': 0.20
-                },
-                'features': {
-                    'returns_periods': [1, 5, 20, 60],
-                    'sma_periods': [20, 50, 200],
-                    'ema_periods': [12, 26],
-                    'macd_params': [12, 26, 9],
-                    'atr_period': 14,
-                    'bollinger_period': 20,
-                    'vol_window': 20
-                },
-                'strategies': {
-                    'scalper_sigma': {'enabled': True},
-                    'trend_breakout': {'enabled': True},
-                    'bull_mode': {'enabled': True},
-                    'market_neutral': {'enabled': True},
-                    'gamma_reversal': {'enabled': True}
-                }
-            }
-        }
+            return load_config("nonexistent.yaml")  # Returns defaults
     
     def _load_models(self) -> Dict[str, Any]:
         """Load trained ML models."""
         models = {}
         
         try:
-            # Load XGBoost classifier
-            classifier_path = os.path.join(os.path.dirname(__file__), 'models/xgb.pkl')
+            # Use paths from config
+            classifier_path = os.path.join(os.path.dirname(__file__), self.config_obj.trading.models.classifier_path)
             if os.path.exists(classifier_path):
                 with open(classifier_path, 'rb') as f:
                     models['classifier'] = pickle.load(f)
                 self.Log("XGBoost classifier loaded")
             
             # Load meta-model
-            meta_path = os.path.join(os.path.dirname(__file__), 'models/meta.pkl')
+            meta_path = os.path.join(os.path.dirname(__file__), self.config_obj.trading.models.meta_model_path)
             if os.path.exists(meta_path):
                 with open(meta_path, 'rb') as f:
                     models['meta_model'] = pickle.load(f)
@@ -177,7 +152,7 @@ class MainAlgo(QCAlgorithm):
                 self.Log(f"Failed to add equity {symbol_str}: {e}")
         
         # Add crypto pairs
-        crypto_symbols = self.config['trading']['universe']['crypto']['symbols']
+        crypto_symbols = self.config['universe']['crypto']  # Updated for new config format
         for symbol_str in crypto_symbols:
             try:
                 crypto = self.AddCrypto(symbol_str, Resolution.Minute)

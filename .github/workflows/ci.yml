@@ -9,24 +9,34 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Set up Python 3.11
+    - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
+        python-version: ${{ matrix.python-version }}
         
     - name: Cache pip dependencies
       uses: actions/cache@v3
       with:
         path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+        key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml') }}
         restore-keys: |
+          ${{ runner.os }}-pip-${{ matrix.python-version }}-
           ${{ runner.os }}-pip-
           
+    - name: Cache pytest
+      uses: actions/cache@v3
+      with:
+        path: .pytest_cache
+        key: ${{ runner.os }}-pytest-${{ matrix.python-version }}-${{ hashFiles('tests/**/*.py') }}
+        
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
@@ -36,15 +46,19 @@ jobs:
       run: |
         ruff check .
         
+    - name: Run formatting check with black
+      run: |
+        black --check .
+        
     - name: Run type checking with mypy
       continue-on-error: true
       run: |
-        mypy algos || true
+        # Exclude QuantConnect stubs to keep CI green
+        mypy algos scripts --ignore-missing-imports || true
         
     - name: Run tests with pytest
-      continue-on-error: true
       run: |
-        pytest -q --tb=short || true
+        pytest -q --maxfail=1
         
     - name: Run self-audit
       run: |
@@ -54,15 +68,6 @@ jobs:
       uses: actions/upload-artifact@v3
       if: always()
       with:
-        name: self-audit-report
+        name: self-audit-report-py${{ matrix.python-version }}
         path: self_audit_report.md
-        
-    - name: Upload pytest report
-      uses: actions/upload-artifact@v3
-      if: always()
-      with:
-        name: pytest-report
-        path: |
-          .coverage
-          htmlcov/
         retention-days: 30

@@ -11,6 +11,9 @@ import importlib.util
 from pathlib import Path
 from typing import Dict, Any, List, Tuple
 
+# Add algos to path for imports
+sys.path.append(str(Path(__file__).parent.parent))
+
 
 class QuantBotAuditor:
     """Repository self-audit system."""
@@ -18,7 +21,7 @@ class QuantBotAuditor:
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root
         self.results: List[Tuple[str, str, str]] = []  # (category, test, status)
-        self.config_data: Dict[str, Any] = {}
+        self.config_obj = None
         
     def add_result(self, category: str, test: str, status: str):
         """Add a test result."""
@@ -30,6 +33,7 @@ class QuantBotAuditor:
             "pyproject.toml",
             "README.md", 
             "config.yaml",
+            "lean.json",
             "MainAlgo.py",
             "algos/core/feature_pipe.py",
             "algos/core/labels.py",
@@ -43,7 +47,10 @@ class QuantBotAuditor:
             "algos/strategies/market_neutral.py",
             "algos/strategies/gamma_reversal.py",
             "notebooks/train_classifier.ipynb",
-            "notebooks/train_ppo.ipynb"
+            "notebooks/train_ppo.ipynb",
+            "tests/test_triple_barrier.py",
+            "tests/test_purged_cv.py",
+            "tests/test_risk_engine.py"
         ]
         
         for file_path in required_files:
@@ -65,74 +72,81 @@ class QuantBotAuditor:
             self.add_result("Files", "tests/", "FAIL")
             
     def validate_config_schema(self) -> None:
-        """Validate config.yaml schema and print normalized view."""
+        """Validate config.yaml schema using new config loader."""
         config_path = self.repo_root / "config.yaml"
         
         if not config_path.exists():
             self.add_result("Config", "config.yaml exists", "FAIL")
             return
-            
+        
         try:
-            with open(config_path, 'r') as f:
-                self.config_data = yaml.safe_load(f)
-            self.add_result("Config", "config.yaml syntax", "PASS")
-        except Exception as e:
-            self.add_result("Config", "config.yaml syntax", f"FAIL: {e}")
-            return
+            # Try to import and use the new config loader
+            from algos.core.config_loader import load_config
             
-        # Check for required top-level keys
-        required_keys = [
-            "trading.universe", "trading.risk", "trading.features", 
-            "trading.labels", "execution", "models"
-        ]
-        
-        # Normalize config - handle both nested and flat forms
-        normalized_config = self._normalize_config(self.config_data)
-        
-        for key_path in required_keys:
-            if self._has_nested_key(normalized_config, key_path):
-                self.add_result("Config", f"key: {key_path}", "PASS")
-            else:
-                self.add_result("Config", f"key: {key_path}", "FAIL")
+            self.config_obj = load_config(str(config_path))
+            self.add_result("Config", "config.yaml loads with new loader", "PASS")
+            
+            # Validate key sections exist
+            if hasattr(self.config_obj, 'trading'):
+                self.add_result("Config", "trading section", "PASS")
                 
-        # Print normalized view
-        print("\n=== NORMALIZED CONFIG VIEW ===")
-        print(yaml.dump(normalized_config, default_flow_style=False, indent=2))
-        print("=" * 30)
-        
-    def _normalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize config to canonical nested form."""
-        # If already in nested form, return as is
-        if "trading" in config and isinstance(config["trading"], dict):
-            return config
+                # Check nested sections
+                if hasattr(self.config_obj.trading, 'universe'):
+                    self.add_result("Config", "trading.universe", "PASS")
+                else:
+                    self.add_result("Config", "trading.universe", "FAIL")
+                    
+                if hasattr(self.config_obj.trading, 'risk'):
+                    self.add_result("Config", "trading.risk", "PASS")
+                    # Validate risk parameters
+                    risk = self.config_obj.trading.risk
+                    if 0 <= risk.per_trade_risk_pct <= 0.05:
+                        self.add_result("Config", "risk.per_trade_risk_pct in range", "PASS")
+                    else:
+                        self.add_result("Config", "risk.per_trade_risk_pct in range", "FAIL")
+                        
+                    if 0 < risk.kill_switch_dd <= 0.5:
+                        self.add_result("Config", "risk.kill_switch_dd in range", "PASS")
+                    else:
+                        self.add_result("Config", "risk.kill_switch_dd in range", "FAIL")
+                else:
+                    self.add_result("Config", "trading.risk", "FAIL")
+                    
+                if hasattr(self.config_obj.trading, 'models'):
+                    self.add_result("Config", "trading.models", "PASS")
+                else:
+                    self.add_result("Config", "trading.models", "FAIL")
+                    
+                if hasattr(self.config_obj.trading, 'strategies'):
+                    self.add_result("Config", "trading.strategies", "PASS")
+                else:
+                    self.add_result("Config", "trading.strategies", "FAIL")
+            else:
+                self.add_result("Config", "trading section", "FAIL")
             
-        # Convert flat form to nested form
-        normalized = {
-            "trading": {
-                "universe": config.get("universe", {}),
-                "risk": config.get("risk", {}),
-                "features": config.get("features", {}),
-                "labels": config.get("labels", {}),
-                "strategies": config.get("strategies", {})
-            },
-            "execution": config.get("execution", {}),
-            "models": config.get("models", {}),
-            "logging": config.get("logging", {}),
-            "cv": config.get("cv", {})
-        }
-        return normalized
-        
-    def _has_nested_key(self, config: Dict[str, Any], key_path: str) -> bool:
-        """Check if nested key exists in config."""
-        keys = key_path.split(".")
-        current = config
-        
-        for key in keys:
-            if not isinstance(current, dict) or key not in current:
-                return False
-            current = current[key]
-        return True
-        
+            # Print normalized config
+            print("\n=== VALIDATED CONFIG ===")
+            config_dict = self.config_obj.dict()
+            print(yaml.dump(config_dict, default_flow_style=False, indent=2))
+            print("=" * 25)
+            
+        except ImportError as e:
+            self.add_result("Config", "config_loader import", f"FAIL: {e}")
+            # Fallback to basic YAML validation
+            try:
+                with open(config_path, 'r') as f:
+                    config_data = yaml.safe_load(f)
+                self.add_result("Config", "config.yaml syntax", "PASS")
+                
+                if 'trading' in config_data:
+                    self.add_result("Config", "trading key present", "PASS")
+                else:
+                    self.add_result("Config", "trading key present", "FAIL")
+                    
+            except Exception as yaml_e:
+                self.add_result("Config", "config.yaml syntax", f"FAIL: {yaml_e}")
+        except Exception as e:
+            self.add_result("Config", "config validation", f"FAIL: {e}")
     def test_core_imports(self) -> None:
         """Test importing core modules to catch syntax/import errors."""
         core_modules = [

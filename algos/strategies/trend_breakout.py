@@ -217,20 +217,32 @@ class TrendBreakoutStrategy:
         """
         if universe_data is None:
             return 0
+        
+        # Initialize symbol_momentum before any try-block to prevent UnboundLocalError    
+        symbol_momentum = 0.0
             
         try:
             # Calculate momentum for current symbol
             lookback = min(len(price_data), 63)  # ~3 months of daily data
             if lookback < 20:
+                logger.debug(f"Insufficient data for momentum calculation: {symbol} (lookback={lookback})")
                 return 0
                 
+            # Only set symbol_momentum after successful calculation
             symbol_momentum = self._calculate_momentum(price_data, lookback)
             
             # Calculate momentum for all symbols in universe
             momentum_scores = {}
             for other_symbol, other_data in universe_data.items():
-                if len(other_data) >= lookback:
-                    momentum_scores[other_symbol] = self._calculate_momentum(other_data, lookback)
+                try:
+                    if len(other_data) >= lookback:
+                        other_momentum = self._calculate_momentum(other_data, lookback)
+                        momentum_scores[other_symbol] = other_momentum
+                    else:
+                        logger.debug(f"Skipping {other_symbol}: insufficient data (len={len(other_data)})")
+                except Exception as e:
+                    logger.debug(f"Skipping {other_symbol} in momentum calculation: {e}")
+                    continue
             
             # Add current symbol
             momentum_scores[symbol] = symbol_momentum
@@ -255,7 +267,10 @@ class TrendBreakoutStrategy:
                 return 0
                 
         except Exception as e:
-            logger.warning(f"Momentum calculation failed for {symbol}: {e}")
+            logger.debug(f"Momentum calculation failed for {symbol}: {e}")
+            # symbol_momentum is already initialized to 0.0, safe to use
+            if symbol_momentum != 0.0:
+                self.momentum_ranks[symbol] = 0.0  # Set neutral rank on error
             return 0
     
     def _calculate_momentum(self, price_data: pd.DataFrame, lookback: int) -> float:
