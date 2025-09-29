@@ -1,0 +1,28 @@
+{
+  "algorithm-type-name": "MainAlgo",
+  "algorithm-language": "Python",
+  "algorithm-location": "MainAlgo.py",
+  "description": "Production-grade quantitative trading bot for LEAN",
+  "parameters": {},
+  "libraries": [
+    "numpy",
+    "pandas", 
+    "scikit-learn",
+    "xgboost",
+    "lightgbm",
+    "ta",
+    "joblib",
+    "loguru",
+    "statsmodels",
+    "matplotlib",
+    "quantstats",
+    "stable-baselines3",
+    "torch",
+    "pyyaml"
+  ],
+  "cloud-node": {
+    "name": "O1-8",
+    "ram": 8192,
+    "cpu-count": 1
+  }
+}
