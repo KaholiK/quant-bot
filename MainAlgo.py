@@ -21,6 +21,7 @@ from algos.core.labels import TripleBarrierLabeler
 from algos.core.risk import RiskManager  
 from algos.core.portfolio import Portfolio, HRPOptimizer, VolatilityTargeting
 from algos.core.exec_rl import ExecutionRL
+from algos.core.strategy_manager import StrategyManager
 from algos.core.config_loader import load_config, get_legacy_dict
 from algos.core.alerts import send_startup_alert
 from algos.strategies.scalper_sigma import ScalperSigmaStrategy
@@ -71,6 +72,7 @@ class MainAlgo(QCAlgorithm):
         self.risk_manager = RiskManager(self.config)
         self.portfolio_manager = Portfolio(self.GetPortfolio().TotalPortfolioValue)
         self.execution_engine = ExecutionRL(self.config)
+        self.strategy_manager = StrategyManager(self.config)
         
         # Initialize strategies
         self.strategies = {
@@ -451,7 +453,7 @@ class MainAlgo(QCAlgorithm):
         }
     
     def _execute_strategy_signals(self, symbol_str: str, strategy_signals: Dict[str, Any], market_conditions: Dict[str, Any]):
-        """Execute trades based on strategy signals."""
+        """Execute trades based on strategy signals using StrategyManager."""
         
         # Get current position
         symbol = self.symbols.get(symbol_str)
@@ -461,39 +463,59 @@ class MainAlgo(QCAlgorithm):
         current_quantity = self.Portfolio[symbol].Quantity
         current_price = self.Securities[symbol].Price
         
-        # Combine signals (simple average for now)
-        combined_signal = 0
-        total_confidence = 0
-        signal_count = 0
-        
+        # Prepare signals by strategy format for StrategyManager
+        signals_by_strategy = {}
         for strategy_name, signal_info in strategy_signals.items():
-            signal = signal_info.get('signal', 0)
-            confidence = signal_info.get('confidence', 0.0)
-            
-            if abs(signal) > 0:
-                combined_signal += signal * confidence
-                total_confidence += confidence
-                signal_count += 1
+            if abs(signal_info.get('signal', 0)) > 0:
+                signals_by_strategy[strategy_name] = {
+                    symbol_str: {
+                        'target_weight': signal_info.get('signal', 0) * signal_info.get('confidence', 0.0),
+                        'confidence': signal_info.get('confidence', 0.0),
+                        'signal': signal_info.get('signal', 0)
+                    }
+                }
         
-        if signal_count == 0 or total_confidence == 0:
+        if not signals_by_strategy:
             return
         
-        # Normalize signal
-        combined_signal = combined_signal / total_confidence
-        avg_confidence = total_confidence / signal_count
+        # Prepare meta-features
+        meta_features = {
+            'volatility': market_conditions.get('volatility', 0.2),
+            'volume_ratio': market_conditions.get('volume_ratio', 1.0),
+            'spread': market_conditions.get('spread', 0.01),
+            'atr_ratio': market_conditions.get('atr_ratio', 1.0),
+            f'{symbol_str}_momentum': market_conditions.get('momentum', 0.0),
+            f'{symbol_str}_volatility': market_conditions.get('volatility', 0.2)
+        }
         
-        # Apply bull mode multiplier
-        bull_multiplier = self.strategies['bull_mode'].get_position_multiplier()
+        # Use StrategyManager to aggregate signals and apply meta-gating
+        final_signals = self.strategy_manager.aggregate_signals(signals_by_strategy, meta_features)
+        
+        if symbol_str not in final_signals:
+            self.Debug(f"No approved signals for {symbol_str} after meta-gating")
+            return
+        
+        signal_info = final_signals[symbol_str]
+        
+        # Log decision details
+        primary_prob = signal_info.get('confidence', 0.0)
+        meta_prob = signal_info.get('meta_prob', 1.0)
+        
+        self.Log(f"{symbol_str}: Primary prob={primary_prob:.3f}, Meta prob={meta_prob:.3f}, "
+                f"Strategy={signal_info.get('strategy', 'unknown')}, Signal ACCEPTED")
         
         # Calculate position size
         atr = strategy_signals[list(strategy_signals.keys())[0]].get('atr', 0.01)
         equity = float(self.Portfolio.TotalPortfolioValue)
         
+        # Use target weight from strategy manager
+        target_weight = signal_info['target_weight']
+        
         base_size = self.risk_manager.calculate_position_size(
             symbol_str, current_price, current_price * 0.95, equity, atr
         )
         
-        target_size = base_size * combined_signal * avg_confidence * bull_multiplier
+        target_size = base_size * target_weight * primary_prob
         size_delta = target_size - current_quantity
         
         if abs(size_delta) < 1:  # Minimum trade size
@@ -520,22 +542,27 @@ class MainAlgo(QCAlgorithm):
             limit_price = current_price + np.sign(size_delta) * execution_decision['limit_offset']
             order_id = self.LimitOrder(symbol, size_delta, limit_price)
         
-        # Log trade
-        self.Log(f"TRADE: {strategy_signals.keys()} -> {symbol_str} "
-                f"signal={combined_signal:.2f} conf={avg_confidence:.2f} "
-                f"size={size_delta:.0f} price={current_price:.4f}")
-        
-        # Update tracking
-        self.trade_count += 1
-        self.risk_manager.log_trade(symbol_str, 'buy' if size_delta > 0 else 'sell', 
-                                   abs(size_delta), current_price, self.Time)
-        
-        # Update strategy positions
-        for strategy_name in strategy_signals.keys():
-            if hasattr(self.strategies[strategy_name], 'update_position'):
+        if order_id:
+            self.last_order_time[symbol_str] = self.Time
+            self.trade_count += 1
+            
+            # Log trade with strategy info
+            self.Log(f"TRADE: {signal_info.get('strategy', 'unknown')} -> {symbol_str} "
+                    f"weight={target_weight:.2f} conf={primary_prob:.2f} "
+                    f"size={size_delta:.0f} price={current_price:.4f}")
+            
+            # Update tracking
+            self.risk_manager.log_trade(symbol_str, 'buy' if size_delta > 0 else 'sell', 
+                                       abs(size_delta), current_price, self.Time)
+            
+            # Update strategy positions
+            strategy_name = signal_info.get('strategy', 'unknown')
+            if strategy_name in self.strategies and hasattr(self.strategies[strategy_name], 'update_position'):
                 self.strategies[strategy_name].update_position(
                     symbol_str, target_size, current_price, self.Time.to_pydatetime()
                 )
+        else:
+            self.Log(f"Failed to place order for {symbol_str}")
     
     def DailyRebalance(self):
         """Daily rebalancing and risk management."""

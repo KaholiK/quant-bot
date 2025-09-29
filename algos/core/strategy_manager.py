@@ -45,7 +45,7 @@ class StrategyManager:
         
         # Meta-filter model
         self.meta_model = None
-        self.meta_threshold = 0.5  # Threshold for meta-filter acceptance
+        self.meta_threshold = self.trading_config.get('learning', {}).get('meta_threshold', 0.55)
         
         # Load meta-filter if available
         self._load_meta_model()
@@ -67,7 +67,124 @@ class StrategyManager:
         except Exception as e:
             logger.warning(f"Failed to load meta-filter model: {e}")
     
-    def aggregate_signals(self, 
+    
+    def aggregate_signals(self, signals_by_strategy: Dict[str, Dict[str, Any]], 
+                         meta_features: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Aggregate signals from multiple strategies with meta-model veto.
+        
+        Flattens per-symbol suggestions across strategies, applies priority/confidence 
+        conflict resolution, and applies meta-model veto if models/meta_filter.joblib 
+        exists and its prob < threshold.
+        
+        Args:
+            signals_by_strategy: Dict of {strategy_name: {symbol: signal_info}}
+            meta_features: Meta-features for meta-model evaluation
+            
+        Returns:
+            Dict of {symbol: target_weight/confidence}
+        """
+        if not signals_by_strategy:
+            return {}
+        
+        # Flatten signals by symbol across strategies
+        symbol_signals = {}
+        for strategy_name, strategy_signals in signals_by_strategy.items():
+            if not self._is_strategy_enabled(strategy_name):
+                continue
+                
+            for symbol, signal_info in strategy_signals.items():
+                if symbol not in symbol_signals:
+                    symbol_signals[symbol] = []
+                
+                signal_info['strategy'] = strategy_name
+                signal_info['priority'] = self.strategy_priorities.get(strategy_name, 1)
+                symbol_signals[symbol].append(signal_info)
+        
+        # Process each symbol
+        final_signals = {}
+        for symbol, signals in symbol_signals.items():
+            if not signals:
+                continue
+                
+            # Sort by priority and confidence
+            signals.sort(key=lambda x: (x['priority'], x.get('confidence', 0.0)), reverse=True)
+            primary_signal = signals[0]
+            
+            # Apply meta-filter veto
+            meta_decision = self._apply_meta_filter_veto(symbol, primary_signal, meta_features)
+            
+            if meta_decision['accept']:
+                final_signals[symbol] = {
+                    'target_weight': primary_signal.get('target_weight', 0.0),
+                    'confidence': primary_signal.get('confidence', 0.0) * meta_decision['confidence'],
+                    'strategy': primary_signal['strategy'],
+                    'meta_prob': meta_decision.get('meta_prob', 1.0)
+                }
+            else:
+                logger.debug(f"Meta-filter rejected signal for {symbol}: {meta_decision['reason']}")
+        
+        return final_signals
+    
+    def _apply_meta_filter_veto(self, symbol: str, primary_signal: Dict[str, Any], 
+                               meta_features: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply meta-filter veto logic."""
+        if self.meta_model is None:
+            return {'accept': True, 'confidence': 1.0, 'reason': 'no_meta_model'}
+        
+        try:
+            # Build meta-features for this symbol/signal
+            features = self._build_meta_features_from_dict(symbol, primary_signal, meta_features)
+            
+            # Get prediction from meta-model
+            if hasattr(self.meta_model, 'predict_proba'):
+                proba = self.meta_model.predict_proba([features])[0]
+                meta_prob = proba[1] if len(proba) > 1 else proba[0]  # Probability of positive class
+            else:
+                # Regression model
+                meta_prob = self.meta_model.predict([features])[0]
+                meta_prob = max(0.0, min(1.0, meta_prob))  # Clamp to [0,1]
+            
+            accept = meta_prob >= self.meta_threshold
+            
+            return {
+                'accept': accept,
+                'confidence': meta_prob if accept else 0.0,
+                'meta_prob': meta_prob,
+                'reason': f"meta_prob_{meta_prob:.3f}_vs_threshold_{self.meta_threshold}"
+            }
+            
+        except Exception as e:
+            logger.warning(f"Meta-filter error for {symbol}: {e}")
+            return {'accept': True, 'confidence': 1.0, 'reason': 'meta_filter_error'}
+    
+    def _build_meta_features_from_dict(self, symbol: str, primary_signal: Dict[str, Any], 
+                                      meta_features: Dict[str, Any]) -> List[float]:
+        """Build feature vector for meta-filter from dictionary inputs."""
+        features = []
+        
+        # Primary signal features
+        features.append(primary_signal.get('confidence', 0.0))
+        features.append(abs(primary_signal.get('signal', 0)))  # Signal strength
+        
+        # Market features from meta_features dict
+        features.append(meta_features.get('volatility', 0.2))
+        features.append(meta_features.get('volume_ratio', 1.0))
+        features.append(meta_features.get('spread', 0.01))
+        features.append(meta_features.get('atr_ratio', 1.0))
+        
+        # Time features
+        now = datetime.now()
+        features.append(now.hour / 24.0)  # Hour of day
+        features.append(now.weekday() / 6.0)  # Day of week
+        
+        # Symbol-specific features (if available)
+        features.append(meta_features.get(f'{symbol}_momentum', 0.0))
+        features.append(meta_features.get(f'{symbol}_volatility', 0.2))
+        
+        return features
+
+    def aggregate_signals_legacy(self, 
                          symbol: str,
                          strategy_signals: Dict[str, Dict[str, Any]],
                          market_features: Dict[str, float],

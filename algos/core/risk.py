@@ -276,6 +276,74 @@ class RiskManager:
         
         return True, "Risk limits OK"
     
+    def should_accept(self, symbol: str, proposed_weight: float) -> bool:
+        """
+        Check if a proposed weight for a symbol should be accepted.
+        
+        Returns False when any cap is violated - use before order placement.
+        
+        Args:
+            symbol: Trading symbol
+            proposed_weight: Proposed portfolio weight for the symbol
+            
+        Returns:
+            bool: True if position should be accepted, False otherwise
+        """
+        if self.is_kill_switch_active:
+            logger.warning(f"Kill switch active - rejecting {symbol}")
+            return False
+        
+        # Check single-name cap
+        if abs(proposed_weight) > self.single_name_max_pct:
+            logger.warning(f"Single-name cap violated for {symbol}: "
+                          f"{abs(proposed_weight):.3f} > {self.single_name_max_pct:.3f}")
+            return False
+        
+        # Check sector cap (if we can determine sector)
+        sector = self._get_sector(symbol)
+        if sector:
+            # Calculate current sector exposure plus this position
+            current_sector_weight = sum(
+                abs(pos_info.get('weight', 0.0)) 
+                for sym, pos_info in self.positions.items() 
+                if self._get_sector(sym) == sector and sym != symbol
+            )
+            new_sector_weight = current_sector_weight + abs(proposed_weight)
+            
+            if new_sector_weight > self.sector_max_pct:
+                logger.warning(f"Sector cap violated for {symbol} ({sector}): "
+                              f"{new_sector_weight:.3f} > {self.sector_max_pct:.3f}")
+                return False
+        
+        # Check asset class caps
+        asset_class = self._get_asset_class(symbol)
+        if asset_class == 'crypto':
+            # Calculate current crypto exposure plus this position
+            current_crypto_weight = sum(
+                abs(pos_info.get('weight', 0.0)) 
+                for sym, pos_info in self.positions.items() 
+                if self._get_asset_class(sym) == 'crypto' and sym != symbol
+            )
+            new_crypto_weight = current_crypto_weight + abs(proposed_weight)
+            
+            if new_crypto_weight > self.crypto_max_gross_pct:
+                logger.warning(f"Crypto gross cap violated for {symbol}: "
+                              f"{new_crypto_weight:.3f} > {self.crypto_max_gross_pct:.3f}")
+                return False
+        
+        # Check leverage cap (approximate)
+        total_gross_weight = sum(
+            abs(pos_info.get('weight', 0.0)) 
+            for pos_info in self.positions.values()
+        ) + abs(proposed_weight)
+        
+        if total_gross_weight > self.max_leverage:
+            logger.warning(f"Leverage cap violated for {symbol}: "
+                          f"{total_gross_weight:.3f} > {self.max_leverage:.3f}")
+            return False
+        
+        return True
+    
     def update_equity_curve(self, portfolio_value: float):
         """Update equity curve and check for kill switch."""
         self.equity_curve.append(portfolio_value)
