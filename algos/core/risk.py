@@ -18,29 +18,52 @@ class RiskManager:
     def __init__(self, config: Dict[str, Any]):
         """Initialize risk manager with configuration."""
         self.config = config
-        self.risk_config = config['risk']
+        
+        # Handle both old and new config formats
+        if 'trading' in config:
+            self.risk_config = config['trading']['risk']
+        else:
+            self.risk_config = config.get('risk', {})
         
         # Risk parameters
-        self.max_leverage = self.risk_config['max_leverage']
-        self.max_position_pct = self.risk_config['max_position_pct']
-        self.max_sector_pct = self.risk_config['max_sector_pct']
-        self.risk_pct_per_trade = self.risk_config['risk_pct_per_trade']
-        self.vol_target = self.risk_config['vol_target']
-        self.kill_switch_dd = self.risk_config['kill_switch_dd']
+        self.max_leverage = self.risk_config.get('max_leverage', 2.0)
+        self.single_name_max_pct = self.risk_config.get('single_name_max_pct', 0.10)
+        self.sector_max_pct = self.risk_config.get('sector_max_pct', 0.30)
+        self.risk_pct_per_trade = self.risk_config.get('per_trade_risk_pct', 0.01)
+        self.vol_target_ann = self.risk_config.get('vol_target_ann', 0.12)
+        self.kill_switch_dd = self.risk_config.get('kill_switch_dd', 0.20)
+        
+        # Asset class caps
+        asset_class_caps = self.risk_config.get('asset_class_caps', {})
+        self.crypto_max_gross_pct = asset_class_caps.get('crypto_max_gross_pct', 0.50)
         
         # State tracking
-        self.positions: Dict[str, float] = {}
+        self.positions: Dict[str, Dict[str, Any]] = {}  # Enhanced position tracking
         self.sector_exposure: Dict[str, float] = {}
+        self.asset_class_exposure: Dict[str, float] = {'crypto': 0.0, 'equity': 0.0}
         self.equity_curve: List[float] = []
         self.peak_equity = 0.0
         self.is_kill_switch_active = False
         self.last_portfolio_value = 0.0
+        self.kill_switch_activation_time: Optional[datetime] = None
         
         # Performance tracking
         self.trade_history: List[Dict[str, Any]] = []
         self.daily_returns: List[float] = []
+        self.vol_target_scaler = 1.0  # Dynamic volatility scaling
+        self.last_vol_update = datetime.now()
         
-        logger.info(f"Risk manager initialized with kill switch at {self.kill_switch_dd:.1%} drawdown")
+        logger.info(f"Risk manager initialized: "
+                   f"max_leverage={self.max_leverage}, "
+                   f"kill_switch_dd={self.kill_switch_dd:.1%}, "
+                   f"vol_target={self.vol_target_ann:.1%}")
+        
+        # Send initialization alert
+        try:
+            self._send_risk_alert("RISK_MANAGER_INIT", 
+                                f"Risk manager initialized with kill switch at {self.kill_switch_dd:.1%}")
+        except Exception as e:
+            logger.warning(f"Failed to send init alert: {e}")
         
     def calculate_position_size(self, 
                               symbol: str,
@@ -85,8 +108,11 @@ class RiskManager:
             logger.warning(f"Invalid stop distance for {symbol}: {stop_distance}")
             return 0.0
             
-        # Apply position limits
-        max_position_value = self.max_position_pct * equity
+        # Apply volatility targeting
+        position_size *= self.vol_target_scaler
+            
+        # Apply single-name position limits
+        max_position_value = self.single_name_max_pct * equity
         max_position_size = max_position_value / entry_price
         
         position_size = min(position_size, max_position_size)
@@ -100,31 +126,111 @@ class RiskManager:
             position_size = max(0, max_additional_leverage * equity / entry_price)
             
         # Check sector limits
-        if hasattr(self, '_get_sector'):
-            sector = self._get_sector(symbol)
+        sector = self._get_sector(symbol)
+        if sector:
             current_sector_exposure = self.sector_exposure.get(sector, 0.0)
-            max_sector_value = self.max_sector_pct * equity
+            max_sector_value = self.sector_max_pct * equity
             
             if current_sector_exposure + (position_size * entry_price) > max_sector_value:
                 max_additional_sector = max_sector_value - current_sector_exposure
                 position_size = max(0, max_additional_sector / entry_price)
         
+        # Check asset class limits
+        asset_class = self._get_asset_class(symbol)
+        if asset_class == 'crypto':
+            current_crypto_exposure = self.asset_class_exposure.get('crypto', 0.0)
+            max_crypto_value = self.crypto_max_gross_pct * equity
+            
+            # Check gross exposure (absolute value)
+            new_crypto_exposure = current_crypto_exposure + abs(position_size * entry_price)
+            if new_crypto_exposure > max_crypto_value:
+                max_additional_crypto = max_crypto_value - current_crypto_exposure
+                position_size = max(0, max_additional_crypto / entry_price)
+                if position_size < abs(quantity):  # Preserve direction
+                    position_size *= np.sign(quantity)
+        
         logger.debug(f"Position size for {symbol}: {position_size:.2f} units "
-                    f"(${position_size * entry_price:.2f} value)")
+                    f"(${position_size * entry_price:.2f} value, "
+                    f"leverage_impact={position_leverage:.2f})")
         
         return position_size
     
     def update_position(self, symbol: str, quantity: float, price: float, sector: Optional[str] = None):
-        """Update position tracking."""
-        old_position = self.positions.get(symbol, 0.0)
-        self.positions[symbol] = old_position + quantity
+        """Update position tracking with enhanced state management."""
+        # Get current position data
+        old_position_data = self.positions.get(symbol, {'quantity': 0.0, 'avg_price': 0.0, 'unrealized_pnl': 0.0})
+        old_quantity = old_position_data['quantity']
+        
+        # Calculate new position
+        new_quantity = old_quantity + quantity
+        
+        # Update average price for the position
+        if new_quantity != 0:
+            total_value = (old_quantity * old_position_data['avg_price']) + (quantity * price)
+            avg_price = total_value / new_quantity
+        else:
+            avg_price = 0.0
+        
+        # Update position data
+        self.positions[symbol] = {
+            'quantity': new_quantity,
+            'avg_price': avg_price,
+            'last_price': price,
+            'unrealized_pnl': (price - avg_price) * new_quantity if new_quantity != 0 else 0.0,
+            'timestamp': datetime.now()
+        }
         
         # Update sector exposure
+        sector = sector or self._get_sector(symbol)
         if sector:
-            old_sector = self.sector_exposure.get(sector, 0.0)
-            self.sector_exposure[sector] = old_sector + (quantity * price)
+            old_sector_exposure = self.sector_exposure.get(sector, 0.0)
+            position_change_value = quantity * price
+            self.sector_exposure[sector] = old_sector_exposure + position_change_value
             
-        logger.debug(f"Updated position {symbol}: {old_position} -> {self.positions[symbol]}")
+        # Update asset class exposure
+        asset_class = self._get_asset_class(symbol)
+        old_class_exposure = self.asset_class_exposure.get(asset_class, 0.0)
+        position_change_value = abs(quantity * price)  # Use absolute for gross exposure
+        self.asset_class_exposure[asset_class] = old_class_exposure + position_change_value
+            
+        logger.debug(f"Updated position {symbol}: {old_quantity} -> {new_quantity} "
+                    f"@ avg_price={avg_price:.2f}, unrealized_pnl={self.positions[symbol]['unrealized_pnl']:.2f}")
+    
+    def _get_sector(self, symbol: str) -> Optional[str]:
+        """Get sector for a symbol."""
+        # Simple sector mapping - in practice, this would use external data
+        sector_map = {
+            'SPY': 'broad_market',
+            'QQQ': 'technology', 
+            'XLF': 'financial',
+            'XLK': 'technology',
+            'XLE': 'energy',
+            'XLV': 'healthcare',
+            'XLI': 'industrial',
+            'XLP': 'consumer_staples',
+            'XLY': 'consumer_discretionary',
+            'XLU': 'utilities',
+            'XLRE': 'real_estate'
+        }
+        
+        return sector_map.get(symbol, 'other')
+    
+    def _get_asset_class(self, symbol: str) -> str:
+        """Get asset class for a symbol."""
+        if any(crypto in symbol.upper() for crypto in ['BTC', 'ETH', 'USD']):
+            return 'crypto'
+        else:
+            return 'equity'
+    
+    def _calculate_current_leverage(self, equity: float) -> float:
+        """Calculate current portfolio leverage."""
+        total_position_value = sum(
+            abs(pos_data['quantity'] * pos_data['last_price'])
+            for pos_data in self.positions.values()
+            if pos_data['quantity'] != 0
+        )
+        
+        return total_position_value / equity if equity > 0 else 0.0
     
     def check_risk_limits(self, 
                          symbol: str, 
@@ -179,32 +285,165 @@ class RiskManager:
             self.peak_equity = portfolio_value
             
         # Calculate drawdown
+        current_dd = 0.0
         if self.peak_equity > 0:
             current_dd = (self.peak_equity - portfolio_value) / self.peak_equity
             
-            # Check kill switch
+            # Check kill switch activation
             if current_dd >= self.kill_switch_dd and not self.is_kill_switch_active:
                 self.activate_kill_switch(current_dd)
+            
+            # Check kill switch deactivation (optional recovery mechanism)  
+            elif current_dd < self.kill_switch_dd * 0.5 and self.is_kill_switch_active:
+                # Deactivate if drawdown reduces to half the threshold
+                self._deactivate_kill_switch(current_dd)
                 
         # Calculate daily return
         if self.last_portfolio_value > 0:
             daily_return = (portfolio_value - self.last_portfolio_value) / self.last_portfolio_value
             self.daily_returns.append(daily_return)
             
+            # Update volatility targeting (weekly)
+            if len(self.daily_returns) % 7 == 0:  # Update weekly
+                self._update_volatility_targeting()
+            
         self.last_portfolio_value = portfolio_value
+        
+        # Keep equity curve manageable (last 1000 points)
+        if len(self.equity_curve) > 1000:
+            self.equity_curve = self.equity_curve[-1000:]
+            
+        # Keep daily returns manageable (last 252 trading days)
+        if len(self.daily_returns) > 252:
+            self.daily_returns = self.daily_returns[-252:]
+            
+        logger.debug(f"Equity update: value={portfolio_value:.2f}, "
+                    f"peak={self.peak_equity:.2f}, dd={current_dd:.2%}, "
+                    f"kill_switch={self.is_kill_switch_active}")
     
     def activate_kill_switch(self, drawdown: float):
         """Activate kill switch due to excessive drawdown."""
         self.is_kill_switch_active = True
+        self.kill_switch_activation_time = datetime.now()
         
-        message = f"🚨 KILL SWITCH ACTIVATED - Drawdown: {drawdown:.1%} (Limit: {self.kill_switch_dd:.1%})"
-        logger.critical(message)
+        message = f"KILL SWITCH ACTIVATED: Drawdown {drawdown:.2%} >= {self.kill_switch_dd:.2%}"
+        logger.error(message)
         
-        # Send Discord notification if configured
-        self._send_discord_notification(message)
+        # Send Discord alert
+        self._send_risk_alert("KILL_SWITCH_ACTIVE", message, "CRITICAL")
         
-        # Log all current positions
-        logger.critical(f"Current positions at kill switch: {self.positions}")
+        # Log position summary
+        total_exposure = sum(
+            abs(pos_data['quantity'] * pos_data['last_price'])
+            for pos_data in self.positions.values()
+        )
+        
+        logger.error(f"Kill switch activated with ${total_exposure:.2f} total exposure across "
+                    f"{len([p for p in self.positions.values() if p['quantity'] != 0])} positions")
+    
+    def _deactivate_kill_switch(self, current_dd: float):
+        """Deactivate kill switch when drawdown improves."""
+        self.is_kill_switch_active = False
+        activation_duration = datetime.now() - self.kill_switch_activation_time if self.kill_switch_activation_time else timedelta(0)
+        
+        message = f"Kill switch deactivated: drawdown improved to {current_dd:.2%} (was active for {activation_duration})"
+        logger.info(message)
+        
+        # Send recovery alert
+        self._send_risk_alert("KILL_SWITCH_DEACTIVATED", message, "INFO")
+        
+    def _update_volatility_targeting(self):
+        """Update volatility targeting scaler based on recent performance."""
+        if len(self.daily_returns) < 20:
+            return  # Need sufficient data
+        
+        # Calculate realized volatility (annualized)
+        recent_returns = np.array(self.daily_returns[-20:])  # Last 20 days
+        realized_vol = np.std(recent_returns) * np.sqrt(252)  # Annualized
+        
+        # Calculate target scaler
+        if realized_vol > 0:
+            target_scaler = self.vol_target_ann / realized_vol
+            
+            # Smooth the adjustment (don't change too quickly)
+            adjustment_speed = 0.1
+            self.vol_target_scaler = (
+                (1 - adjustment_speed) * self.vol_target_scaler + 
+                adjustment_speed * target_scaler
+            )
+            
+            # Reasonable bounds
+            self.vol_target_scaler = np.clip(self.vol_target_scaler, 0.2, 3.0)
+            
+            logger.debug(f"Vol targeting: realized={realized_vol:.2%}, "
+                        f"target={self.vol_target_ann:.2%}, "
+                        f"scaler={self.vol_target_scaler:.2f}")
+        
+        self.last_vol_update = datetime.now()
+    
+    def _send_risk_alert(self, event_type: str, message: str, severity: str = "WARNING"):
+        """Send risk management alert."""
+        try:
+            # Import here to avoid circular imports
+            from .alerts import send_risk_alert
+            send_risk_alert(event_type, message, severity)
+        except Exception as e:
+            logger.warning(f"Failed to send risk alert: {e}")
+    
+    def flatten_all_positions(self) -> List[Dict[str, Any]]:
+        """Generate orders to flatten all positions (used by kill switch)."""
+        flatten_orders = []
+        
+        for symbol, pos_data in self.positions.items():
+            if pos_data['quantity'] != 0:
+                flatten_orders.append({
+                    'symbol': symbol,
+                    'quantity': -pos_data['quantity'],  # Opposite direction
+                    'order_type': 'market',
+                    'reason': 'kill_switch_flatten'
+                })
+        
+        logger.info(f"Generated {len(flatten_orders)} flatten orders for kill switch")
+        return flatten_orders
+    
+    def get_risk_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive risk metrics."""
+        current_dd = 0.0
+        if self.peak_equity > 0 and len(self.equity_curve) > 0:
+            current_dd = (self.peak_equity - self.equity_curve[-1]) / self.peak_equity
+        
+        # Calculate realized volatility
+        realized_vol = 0.0
+        if len(self.daily_returns) >= 20:
+            realized_vol = np.std(self.daily_returns[-20:]) * np.sqrt(252)
+        
+        # Position summary
+        active_positions = sum(1 for pos in self.positions.values() if pos['quantity'] != 0)
+        total_exposure = sum(
+            abs(pos['quantity'] * pos['last_price'])
+            for pos in self.positions.values()
+        )
+        
+        current_leverage = 0.0
+        if len(self.equity_curve) > 0:
+            current_leverage = total_exposure / self.equity_curve[-1] if self.equity_curve[-1] > 0 else 0.0
+        
+        return {
+            'current_drawdown': current_dd,
+            'peak_equity': self.peak_equity,
+            'kill_switch_active': self.is_kill_switch_active,
+            'kill_switch_threshold': self.kill_switch_dd,
+            'realized_volatility_ann': realized_vol,
+            'vol_target_ann': self.vol_target_ann,
+            'vol_target_scaler': self.vol_target_scaler,
+            'current_leverage': current_leverage,
+            'max_leverage': self.max_leverage,
+            'active_positions': active_positions,
+            'total_exposure': total_exposure,
+            'sector_exposure': self.sector_exposure.copy(),
+            'asset_class_exposure': self.asset_class_exposure.copy(),
+            'total_trades': len(self.trade_history)
+        }
         
     def deactivate_kill_switch(self):
         """Manually deactivate kill switch."""

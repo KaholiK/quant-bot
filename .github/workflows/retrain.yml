@@ -1,0 +1,289 @@
+name: Model Retraining
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: 'Force retraining even if no improvement'
+        required: false
+        default: 'false'
+        type: boolean
+  schedule:
+    # Run weekly on Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180  # 3 hours max
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        lfs: true
+        
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-retrain-${{ hashFiles('**/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-retrain-
+          ${{ runner.os }}-pip-
+          
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install yfinance requests binance-python stable-baselines3[extra] torch
+        
+    - name: Download LFS files
+      run: git lfs pull
+      
+    - name: Create output directories
+      run: |
+        mkdir -p models_new
+        mkdir -p policies_new
+        mkdir -p reports
+        mkdir -p data
+        
+    - name: Train classifier
+      id: train_classifier
+      run: |
+        echo "Training XGBoost classifier..."
+        python scripts/train_classifier.py \
+          --output-dir models_new \
+          --data-dir data \
+          --config config.yaml \
+          --cv-folds 5 \
+          --n-jobs -1 \
+          --save-calibration-plots reports/ \
+          --verbose
+          
+        # Check if new model exists
+        if [ -f "models_new/xgb_classifier.joblib" ]; then
+          echo "classifier_trained=true" >> $GITHUB_OUTPUT
+        else
+          echo "classifier_trained=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Train PPO policy
+      id: train_ppo
+      continue-on-error: true
+      run: |
+        echo "Training PPO execution policy..."
+        python scripts/train_ppo.py \
+          --output-dir policies_new \
+          --config config.yaml \
+          --total-timesteps 100000 \
+          --n-envs 4 \
+          --save-replay-buffer \
+          --verbose
+          
+        # Check if new policy exists
+        if [ -f "policies_new/ppo_policy.zip" ]; then
+          echo "ppo_trained=true" >> $GITHUB_OUTPUT
+        else
+          echo "ppo_trained=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Train meta-filter
+      id: train_meta
+      run: |
+        echo "Training meta-filter model..."
+        python scripts/train_meta_filter.py \
+          --input-data data/ \
+          --output-dir models_new \
+          --config config.yaml \
+          --threshold-optimization \
+          --save-plots reports/
+          
+        if [ -f "models_new/meta_filter.joblib" ]; then
+          echo "meta_trained=true" >> $GITHUB_OUTPUT
+        else
+          echo "meta_trained=false" >> $GITHUB_OUTPUT
+        fi
+        
+    - name: Evaluate models
+      id: evaluate
+      run: |
+        echo "Evaluating new models..."
+        python scripts/evaluate_models.py \
+          --old-models models/ \
+          --new-models models_new/ \
+          --config config.yaml \
+          --report reports/model_comparison.json \
+          --plots reports/
+        
+        # Parse evaluation results
+        IMPROVEMENT=$(python -c "
+        import json
+        try:
+            with open('reports/model_comparison.json') as f:
+                results = json.load(f)
+            
+            # Check improvement criteria from config
+            old_sortino = results.get('old_model', {}).get('oos_sortino', 0)
+            new_sortino = results.get('new_model', {}).get('oos_sortino', 0)
+            
+            old_pf = results.get('old_model', {}).get('oos_profit_factor', 0)
+            new_pf = results.get('new_model', {}).get('oos_profit_factor', 0)
+            
+            old_dd = results.get('old_model', {}).get('oos_max_dd', 1.0)
+            new_dd = results.get('new_model', {}).get('oos_max_dd', 1.0)
+            
+            # Improvement criteria
+            sortino_improved = new_sortino > old_sortino * 1.05  # 5% improvement
+            pf_improved = new_pf > old_pf * 1.02  # 2% improvement  
+            dd_improved = new_dd < old_dd * 0.95  # 5% better drawdown
+            
+            # Gates from config
+            meets_gates = (new_sortino >= 1.2 and new_pf >= 1.15 and new_dd <= 0.06)
+            
+            improved = (sortino_improved or pf_improved or dd_improved) and meets_gates
+            print('true' if improved else 'false')
+        except Exception as e:
+            print('false')
+        ")
+        
+        echo "improvement_detected=$IMPROVEMENT" >> $GITHUB_OUTPUT
+        echo "Model improvement detected: $IMPROVEMENT"
+        
+    - name: Generate drift report
+      run: |
+        echo "Generating model drift analysis..."
+        python scripts/analyze_drift.py \
+          --data-dir data/ \
+          --models-dir models/ \
+          --output reports/drift_analysis.html \
+          --config config.yaml
+          
+    - name: Upload evaluation artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: retraining-report-${{ github.run_id }}
+        path: |
+          reports/
+          models_new/
+          policies_new/
+        retention-days: 30
+        
+    - name: Commit improved models
+      if: steps.evaluate.outputs.improvement_detected == 'true' || github.event.inputs.force_retrain == 'true'
+      run: |
+        # Configure git
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        
+        # Copy new models over old ones
+        if [ "${{ steps.train_classifier.outputs.classifier_trained }}" == "true" ]; then
+          cp models_new/xgb_classifier.joblib models/
+          git add models/xgb_classifier.joblib
+        fi
+        
+        if [ "${{ steps.train_meta.outputs.meta_trained }}" == "true" ]; then
+          cp models_new/meta_filter.joblib models/
+          git add models/meta_filter.joblib
+        fi
+        
+        if [ "${{ steps.train_ppo.outputs.ppo_trained }}" == "true" ]; then
+          cp policies_new/ppo_policy.zip policies/
+          git add policies/ppo_policy.zip
+        fi
+        
+        # Commit with evaluation summary
+        COMMIT_MSG="chore: retrain models $(date +%Y-%m-%d)
+
+        Automated model retraining results:
+        - Classifier: ${{ steps.train_classifier.outputs.classifier_trained }}
+        - PPO Policy: ${{ steps.train_ppo.outputs.ppo_trained }}
+        - Meta-filter: ${{ steps.train_meta.outputs.meta_trained }}
+        - Improvement detected: ${{ steps.evaluate.outputs.improvement_detected }}
+        - Force retrain: ${{ github.event.inputs.force_retrain }}
+        
+        See artifact retraining-report-${{ github.run_id }} for detailed results."
+        
+        if git diff --staged --quiet; then
+          echo "No model changes to commit"
+        else
+          git commit -m "$COMMIT_MSG"
+          git push
+        fi
+        
+    - name: Create PR for model updates
+      if: steps.evaluate.outputs.improvement_detected == 'true'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "feat: improved models from automated retraining"
+        title: "🤖 Automated Model Update - $(date +%Y-%m-%d)"
+        body: |
+          ## Automated Model Retraining Results
+          
+          **Training Date:** $(date +%Y-%m-%d %H:%M:%S UTC)
+          **Trigger:** ${{ github.event_name }}
+          
+          ### Models Updated
+          - ✅ Classifier: ${{ steps.train_classifier.outputs.classifier_trained }}
+          - ✅ Meta-filter: ${{ steps.train_meta.outputs.meta_trained }}
+          - ✅ PPO Policy: ${{ steps.train_ppo.outputs.ppo_trained }}
+          
+          ### Performance Improvement
+          - **Improvement Detected:** ${{ steps.evaluate.outputs.improvement_detected }}
+          - **Meets Promotion Gates:** ✅
+          
+          ### Artifacts
+          - 📊 [Evaluation Report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - 📈 Calibration plots and performance metrics available in artifacts
+          - 🧠 Drift analysis included
+          
+          ### Next Steps
+          1. Review the evaluation metrics in the artifacts
+          2. Verify the model improvements align with expectations
+          3. Merge to deploy the updated models
+          4. Monitor live performance for any degradation
+          
+          ---
+          *This PR was created automatically by the retraining workflow.*
+        branch: auto-retrain-${{ github.run_id }}
+        delete-branch: true
+        
+    - name: Send notification
+      if: always()
+      run: |
+        # Send Discord notification if webhook is configured
+        if [ -n "${{ secrets.DISCORD_WEBHOOK_URL }}" ]; then
+          python -c "
+          import requests, json, os
+          
+          webhook_url = '${{ secrets.DISCORD_WEBHOOK_URL }}'
+          
+          status = '✅ SUCCESS' if '${{ job.status }}' == 'success' else '❌ FAILED'
+          improvement = '${{ steps.evaluate.outputs.improvement_detected }}'
+          
+          embed = {
+              'title': f'🤖 Model Retraining {status}',
+              'color': 0x00ff00 if '${{ job.status }}' == 'success' else 0xff0000,
+              'fields': [
+                  {'name': 'Classifier', 'value': '${{ steps.train_classifier.outputs.classifier_trained }}', 'inline': True},
+                  {'name': 'PPO Policy', 'value': '${{ steps.train_ppo.outputs.ppo_trained }}', 'inline': True},
+                  {'name': 'Meta-filter', 'value': '${{ steps.train_meta.outputs.meta_trained }}', 'inline': True},
+                  {'name': 'Improvement', 'value': improvement, 'inline': True},
+                  {'name': 'Repository', 'value': '${{ github.repository }}', 'inline': True},
+                  {'name': 'Run ID', 'value': '${{ github.run_id }}', 'inline': True}
+              ],
+              'timestamp': '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+          }
+          
+          payload = {'embeds': [embed]}
+          requests.post(webhook_url, json=payload)
+          "
+        fi
