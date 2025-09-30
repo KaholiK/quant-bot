@@ -1,0 +1,46 @@
+# Development Dockerfile with build tools
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Install system dependencies and build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    make \
+    gcc \
+    g++ \
+    curl \
+    vim \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 -s /bin/bash botuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements and install Python dependencies (including dev dependencies)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir \
+    ipython \
+    ipdb \
+    jupyter
+
+# Create necessary directories
+RUN mkdir -p /app/data/cache /app/data/runtime /app/logs && \
+    chown -R botuser:botuser /app
+
+# Switch to non-root user
+USER botuser
+
+# Set PYTHONPATH
+ENV PYTHONPATH=/app
+
+# Default command (interactive shell)
+CMD ["/bin/bash"]

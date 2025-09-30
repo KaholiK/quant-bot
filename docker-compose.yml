@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  # Main application service
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quant-bot-app
+    restart: unless-stopped
+    environment:
+      - APP_ENV=${APP_ENV:-dev}
+      - RUN_MODE=${RUN_MODE:-paper}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_URL=postgresql://quantbot:${POSTGRES_PASSWORD:-quantbot123}@db:5432/quantbot
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - quant-net
+    command: ["python", "-m", "scripts.env_smoke"]
+
+  # PostgreSQL database service
+  db:
+    image: postgres:15-alpine
+    container_name: quant-bot-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=quantbot
+      - POSTGRES_USER=quantbot
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-quantbot123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - quant-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quantbot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Development service (optional)
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: quant-bot-dev
+    profiles:
+      - dev
+    environment:
+      - APP_ENV=dev
+      - RUN_MODE=paper
+      - LOG_LEVEL=DEBUG
+      - DATABASE_URL=postgresql://quantbot:${POSTGRES_PASSWORD:-quantbot123}@db:5432/quantbot
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - dev_cache:/home/botuser/.cache
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - quant-net
+    stdin_open: true
+    tty: true
+    command: ["/bin/bash"]
+
+volumes:
+  postgres_data:
+    driver: local
+  dev_cache:
+    driver: local
+
+networks:
+  quant-net:
+    driver: bridge

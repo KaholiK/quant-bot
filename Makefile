@@ -1,4 +1,4 @@
-.PHONY: help env.smoke smoke db.init db.purge data.crypto data.equities backtest.quick paper.quick lint test test.cov clean
+.PHONY: help env.smoke smoke db.init db.purge data.crypto data.equities backtest.quick paper.quick lint test test.cov clean up down logs shell build
 
 # Default target
 help:
@@ -15,6 +15,13 @@ help:
 	@echo "  test              - Run pytest"
 	@echo "  test.cov          - Run pytest with coverage (fails if < 90%)"
 	@echo "  clean             - Clean build artifacts and caches"
+	@echo ""
+	@echo "Docker targets:"
+	@echo "  build             - Build Docker images"
+	@echo "  up                - Start containers (app + db)"
+	@echo "  down              - Stop and remove containers"
+	@echo "  logs              - Follow container logs"
+	@echo "  shell             - Open shell in dev container"
 
 # Environment validation
 env.smoke:
@@ -93,3 +100,24 @@ clean:
 	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	@echo "Clean complete"
+
+# Docker targets
+build:
+	@echo "Building Docker images..."
+	docker compose build
+
+up:
+	@echo "Starting containers..."
+	docker compose up -d
+	@echo "Containers started. Use 'make logs' to view logs."
+
+down:
+	@echo "Stopping containers..."
+	docker compose down
+
+logs:
+	docker compose logs -f
+
+shell:
+	@echo "Opening shell in dev container..."
+	docker compose --profile dev run --rm dev
