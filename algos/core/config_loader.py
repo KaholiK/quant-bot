@@ -24,18 +24,24 @@ class BarsConfig(BaseModel):
     crypto: str = Field(default="15m", description="Crypto bar timeframe")
 
 
+class BlackoutConfig(BaseModel):
+    """Blackout period configuration."""
+    earnings: bool = Field(default=True, description="Block trades around earnings")
+    fomc: bool = Field(default=True, description="Block trades on FOMC days")
+
+
 class RiskConfig(BaseModel):
     """Risk management configuration."""
     per_trade_risk_pct: float = Field(default=0.01, ge=0.0, le=0.05, description="Risk per trade (0-5%)")
     max_leverage: float = Field(default=2.0, ge=1.0, le=10.0, description="Maximum leverage")
     single_name_max_pct: float = Field(default=0.10, ge=0.01, le=0.50, description="Max position per symbol")
     sector_max_pct: float = Field(default=0.30, ge=0.05, le=1.0, description="Max exposure per sector")
-    asset_class_caps: Dict[str, float] = Field(
-        default={"crypto_max_gross_pct": 0.50}, 
-        description="Asset class exposure caps"
-    )
-    kill_switch_dd: float = Field(default=0.20, gt=0.0, le=0.5, description="Kill switch drawdown threshold")
+    crypto_max_gross_pct: float = Field(default=0.50, ge=0.1, le=1.0, description="Max crypto gross exposure")
     vol_target_ann: float = Field(default=0.12, gt=0.01, le=1.0, description="Volatility target (annualized)")
+    kill_switch_dd: float = Field(default=0.20, gt=0.0, le=0.5, description="Kill switch drawdown threshold")
+    day_stop_dd: float = Field(default=0.06, gt=0.0, le=0.5, description="Daily stop loss drawdown")
+    week_stop_dd: float = Field(default=0.10, gt=0.0, le=0.5, description="Weekly stop loss drawdown")
+    blackout: BlackoutConfig = BlackoutConfig()
 
 
 class ModelsConfig(BaseModel):
@@ -102,6 +108,24 @@ class LearningConfig(BaseModel):
     meta_threshold: float = Field(default=0.55, description="Meta-model probability threshold")
 
 
+class LabelsConfig(BaseModel):
+    """Label generation configuration."""
+    horizon_bars: int = Field(default=5, description="Label horizon in bars")
+    tp_atr_mult: float = Field(default=1.75, description="Take profit ATR multiplier")
+    sl_atr_mult: float = Field(default=1.00, description="Stop loss ATR multiplier")
+
+
+class RegimeConfig(BaseModel):
+    """Regime detection configuration."""
+    enabled: bool = Field(default=True, description="Enable regime detection")
+    smooth_bars: int = Field(default=5, description="Smoothing window for regime")
+
+
+class CapacityConfig(BaseModel):
+    """Capacity management configuration."""
+    adv_cap_pct: float = Field(default=0.05, ge=0.01, le=0.2, description="ADV capacity percentage")
+
+
 class ExecutionConfig(BaseModel):
     """Execution configuration."""
     maker_ladder_offsets_atr: List[float] = Field(
@@ -117,13 +141,15 @@ class TradingConfig(BaseModel):
     """Main trading configuration."""
     universe: UniverseConfig = UniverseConfig()
     bars: BarsConfig = BarsConfig()
+    features: FeaturesConfig = FeaturesConfig()
+    labels: LabelsConfig = LabelsConfig()
+    regime: RegimeConfig = RegimeConfig()
+    capacity: CapacityConfig = CapacityConfig()
     risk: RiskConfig = RiskConfig()
     models: ModelsConfig = ModelsConfig()
     strategies: StrategiesConfig = StrategiesConfig()
     learning: LearningConfig = LearningConfig()
     execution: ExecutionConfig = ExecutionConfig()
-    features: FeaturesConfig = FeaturesConfig()
-    labels: LabelsConfig = LabelsConfig()
 
 
 class QuantBotConfig(BaseModel):
