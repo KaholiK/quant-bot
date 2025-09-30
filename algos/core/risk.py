@@ -29,13 +29,24 @@ class RiskManager:
         self.max_leverage = self.risk_config.get('max_leverage', 2.0)
         self.single_name_max_pct = self.risk_config.get('single_name_max_pct', 0.10)
         self.sector_max_pct = self.risk_config.get('sector_max_pct', 0.30)
+        self.crypto_max_gross_pct = self.risk_config.get('crypto_max_gross_pct', 0.50)
         self.risk_pct_per_trade = self.risk_config.get('per_trade_risk_pct', 0.01)
         self.vol_target_ann = self.risk_config.get('vol_target_ann', 0.12)
         self.kill_switch_dd = self.risk_config.get('kill_switch_dd', 0.20)
         
-        # Asset class caps
-        asset_class_caps = self.risk_config.get('asset_class_caps', {})
-        self.crypto_max_gross_pct = asset_class_caps.get('crypto_max_gross_pct', 0.50)
+        # New risk features
+        self.day_stop_dd = self.risk_config.get('day_stop_dd', 0.06)
+        self.week_stop_dd = self.risk_config.get('week_stop_dd', 0.10)
+        
+        # Blackout configuration
+        blackout_config = self.risk_config.get('blackout', {})
+        self.earnings_blackout = blackout_config.get('earnings', True)
+        self.fomc_blackout = blackout_config.get('fomc', True)
+        
+        # PDT (Pattern Day Trader) rules
+        self.pdt_threshold = 25000.0  # $25k threshold for PDT rule
+        self.day_trade_count = 0
+        self.day_trade_reset_date = datetime.now().date()
         
         # State tracking
         self.positions: Dict[str, Dict[str, Any]] = {}  # Enhanced position tracking
@@ -44,6 +55,8 @@ class RiskManager:
         self.equity_curve: List[float] = []
         self.peak_equity = 0.0
         self.is_kill_switch_active = False
+        self.day_start_equity = 0.0
+        self.week_start_equity = 0.0
         self.last_portfolio_value = 0.0
         self.kill_switch_activation_time: Optional[datetime] = None
         
@@ -231,6 +244,155 @@ class RiskManager:
         )
         
         return total_position_value / equity if equity > 0 else 0.0
+    
+    def check_day_stop(self, current_equity: float) -> bool:
+        """Check if daily stop loss is triggered."""
+        if self.day_start_equity == 0.0:
+            self.day_start_equity = current_equity
+            return False
+        
+        daily_drawdown = (self.day_start_equity - current_equity) / self.day_start_equity
+        
+        if daily_drawdown >= self.day_stop_dd:
+            logger.warning(f"Daily stop loss triggered: {daily_drawdown:.2%} >= {self.day_stop_dd:.2%}")
+            return True
+        
+        return False
+    
+    def check_week_stop(self, current_equity: float) -> bool:
+        """Check if weekly stop loss is triggered."""
+        if self.week_start_equity == 0.0:
+            self.week_start_equity = current_equity
+            return False
+        
+        weekly_drawdown = (self.week_start_equity - current_equity) / self.week_start_equity
+        
+        if weekly_drawdown >= self.week_stop_dd:
+            logger.warning(f"Weekly stop loss triggered: {weekly_drawdown:.2%} >= {self.week_stop_dd:.2%}")
+            return True
+        
+        return False
+    
+    def reset_daily_counters(self) -> None:
+        """Reset daily counters (call at start of each day)."""
+        today = datetime.now().date()
+        
+        if today != self.day_trade_reset_date:
+            self.day_trade_count = 0
+            self.day_trade_reset_date = today
+            
+            # Reset daily equity tracking
+            if self.equity_curve:
+                self.day_start_equity = self.equity_curve[-1]
+            
+            logger.debug(f"Daily counters reset for {today}")
+    
+    def reset_weekly_counters(self) -> None:
+        """Reset weekly counters (call at start of each week)."""
+        if self.equity_curve:
+            self.week_start_equity = self.equity_curve[-1]
+        
+        logger.debug("Weekly counters reset")
+    
+    def check_pdt_rules(self, symbol: str, quantity: float, current_equity: float) -> Tuple[bool, str]:
+        """
+        Check Pattern Day Trader (PDT) rules compliance.
+        
+        Args:
+            symbol: Trading symbol
+            quantity: Proposed trade quantity
+            current_equity: Current account equity
+            
+        Returns:
+            Tuple of (is_allowed, reason)
+        """
+        # PDT rules only apply to equity accounts under $25k
+        if current_equity >= self.pdt_threshold:
+            return True, "Account above PDT threshold"
+        
+        # Check if this would be a day trade
+        current_position = self.positions.get(symbol, {}).get('quantity', 0.0)
+        
+        # Day trade occurs when opening and closing a position on the same day
+        if current_position == 0 and quantity != 0:
+            # Opening new position - check if we might close it today
+            if self.day_trade_count >= 3:
+                return False, f"PDT limit reached: {self.day_trade_count}/3 day trades used"
+        elif current_position != 0 and (current_position > 0) != (current_position + quantity > 0):
+            # Position flip (long to short or vice versa) counts as day trade
+            if self.day_trade_count >= 3:
+                return False, f"PDT limit reached: {self.day_trade_count}/3 day trades used"
+        
+        return True, "PDT rules compliant"
+    
+    def record_day_trade(self, symbol: str) -> None:
+        """Record a day trade for PDT tracking."""
+        self.day_trade_count += 1
+        logger.info(f"Day trade recorded for {symbol}: {self.day_trade_count}/3 used")
+    
+    def check_blackout_periods(self, symbol: str, event_features: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
+        """
+        Check if trading is blocked due to blackout periods.
+        
+        Args:
+            symbol: Trading symbol
+            event_features: Features containing earnings_proximity and fomc_day flags
+            
+        Returns:
+            Tuple of (is_allowed, reason)
+        """
+        if event_features is None:
+            return True, "No event data available"
+        
+        # Check earnings blackout
+        if self.earnings_blackout and event_features.get('earnings_proximity', 0):
+            return False, f"Earnings blackout active for {symbol}"
+        
+        # Check FOMC blackout
+        if self.fomc_blackout and event_features.get('fomc_day', 0):
+            return False, "FOMC blackout active"
+        
+        return True, "No blackout restrictions"
+    
+    def calculate_atr_position_size(self, 
+                                  symbol: str, 
+                                  price: float, 
+                                  atr: float, 
+                                  equity: float,
+                                  stop_loss_atr_mult: float = 1.0) -> float:
+        """
+        Calculate position size based on ATR and risk per trade.
+        
+        Args:
+            symbol: Trading symbol
+            price: Current price
+            atr: Average True Range
+            equity: Current account equity
+            stop_loss_atr_mult: Stop loss distance in ATR units
+            
+        Returns:
+            Position size in shares
+        """
+        if atr <= 0 or price <= 0 or equity <= 0:
+            return 0.0
+        
+        # Risk amount in dollars
+        risk_amount = equity * self.risk_pct_per_trade
+        
+        # Stop distance in price terms
+        stop_distance = atr * stop_loss_atr_mult
+        
+        # Position size = risk amount / stop distance
+        position_size = risk_amount / stop_distance
+        
+        # Convert to number of shares
+        shares = position_size / price
+        
+        logger.debug(f"ATR position sizing for {symbol}: "
+                    f"risk_amount=${risk_amount:.2f}, stop_distance=${stop_distance:.2f}, "
+                    f"shares={shares:.2f}")
+        
+        return shares
     
     def check_risk_limits(self, 
                          symbol: str, 
