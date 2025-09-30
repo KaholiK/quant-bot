@@ -29,7 +29,6 @@ class TradeStorage:
         
         if self.use_postgres:
             logger.info("Postgres URL detected, will use PostgreSQL for storage")
-            # TODO: Add PostgreSQL support in future version
             self.use_postgres = False
             logger.warning("PostgreSQL support not yet implemented, falling back to SQLite")
         
