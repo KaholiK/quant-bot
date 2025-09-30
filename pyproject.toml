@@ -44,10 +44,19 @@ dev = [
     "pytest-cov>=4.1.0",
     "jupyter>=1.0.0",
 ]
+ui = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.23.0",
+    "prometheus-client>=0.16.0",
+    "discord.py>=2.3.0",
+    "python-dotenv>=1.0.0",
+    "jinja2>=3.1.0",
+    "aiofiles>=23.0.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["algos*", "tests*"]
+include = ["algos*", "tests*", "services*", "bots*", "storage*"]
 
 [tool.ruff]
 target-version = "py311"

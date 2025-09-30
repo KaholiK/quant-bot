@@ -6,6 +6,23 @@ trading:
   bars:
     equities: 30m
     crypto: 15m
+  features:
+    returns_periods: [1, 5, 20, 60]
+    sma_periods: [20, 50, 200]
+    ema_periods: [12, 26]
+    macd_params: {fast: 12, slow: 26, signal: 9}
+    atr_period: 14
+    bollinger_period: 20
+    vol_window: 20
+  labels:
+    horizon_bars: 5
+    tp_atr_mult: 1.75
+    sl_atr_mult: 1.0
+  regime:
+    enabled: true
+    smooth_bars: 5
+  capacity:
+    adv_cap_pct: 0.05
   risk:
     per_trade_risk_pct: 0.01
     max_leverage: 2.0
@@ -19,23 +36,6 @@ trading:
     blackout:
       earnings: true
       fomc: true
-  features:
-    returns_periods: [1, 5, 20, 60]
-    sma_periods: [20, 50, 200]
-    ema_periods: [12, 26]
-    macd_params: {fast: 12, slow: 26, signal: 9}
-    atr_period: 14
-    bollinger_period: 20
-    vol_window: 20
-  labels:
-    horizon_bars: 5
-    tp_atr_mult: 1.75
-    sl_atr_mult: 1.00
-  regime:
-    enabled: true
-    smooth_bars: 5
-  capacity:
-    adv_cap_pct: 0.05
   models:
     classifier_path: models/xgb_classifier.joblib
     meta_model_path: models/meta_filter.joblib
@@ -56,3 +56,11 @@ trading:
     min_ms_between_orders: 300
     min_hold_secs: 60
     use_vector_env: true
+  strategy_priority_by_regime:
+    trend: [trend_breakout, bull_mode, scalper_sigma, market_neutral, gamma_reversal]
+    chop: [scalper_sigma, market_neutral, gamma_reversal, trend_breakout, bull_mode]
+    high-vol: [scalper_sigma, gamma_reversal, trend_breakout, market_neutral, bull_mode]
+    low-vol: [trend_breakout, bull_mode, market_neutral, scalper_sigma, gamma_reversal]
+  ui:
+    discord: {enabled: true, guild_id: 0}
+    admin_api: {enabled: true, host: "0.0.0.0", port: 8080, polling_interval_sec: 120}

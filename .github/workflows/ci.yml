@@ -42,7 +42,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -e .
+        pip install -e .[ui]
         pip install ruff mypy pytest pytest-cov
         
     - name: Run linting with ruff
@@ -118,7 +118,39 @@ jobs:
         from algos.core.exec_rl import ExecutionRL
         from algos.strategies.trend_breakout import TrendBreakoutStrategy
         
+        # Test new UI components
+        from algos.core.runtime_state import RuntimeState, get_runtime_state
+        from algos.core.polling import fetch_runtime_state, RuntimeStatePoller
+        from storage.trades import TradeStorage, get_trade_storage
+        
         print('✅ All critical imports successful')
+        "
+        
+    - name: Test UI component initialization
+      run: |
+        python -c "
+        # Test UI components can be initialized
+        from algos.core.config_loader import load_config
+        from algos.core.runtime_state import initialize_runtime_state
+        from storage.trades import TradeStorage
+        
+        # Load config and test UI section
+        config = load_config('config.yaml')
+        assert hasattr(config.trading, 'ui'), 'UI configuration missing'
+        assert hasattr(config.trading.ui, 'discord'), 'Discord config missing'
+        assert hasattr(config.trading.ui, 'admin_api'), 'Admin API config missing'
+        
+        # Test runtime state initialization
+        runtime_state = initialize_runtime_state(config)
+        state_dict = runtime_state.to_dict()
+        assert 'strategy_enabled' in state_dict, 'Strategy state missing'
+        assert 'risk_params' in state_dict, 'Risk params missing'
+        
+        # Test storage initialization
+        storage = TradeStorage('test.db')
+        assert storage is not None, 'Storage initialization failed'
+        
+        print('✅ UI component initialization tests passed')
         "
         
     - name: Security audit with bandit

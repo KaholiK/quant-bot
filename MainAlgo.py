@@ -24,6 +24,9 @@ from algos.core.exec_rl import ExecutionRL
 from algos.core.strategy_manager import StrategyManager
 from algos.core.config_loader import load_config, get_legacy_dict
 from algos.core.alerts import send_startup_alert
+from algos.core.runtime_state import initialize_runtime_state, get_runtime_state
+from algos.core.polling import RuntimeStatePoller
+from storage.trades import get_trade_storage
 from algos.strategies.scalper_sigma import ScalperSigmaStrategy
 from algos.strategies.trend_breakout import TrendBreakoutStrategy
 from algos.strategies.bull_mode import BullModeStrategy
@@ -74,6 +77,30 @@ class MainAlgo(QCAlgorithm):
         self.execution_engine = ExecutionRL(self.config)
         self.strategy_manager = StrategyManager(self.config)
         
+        # Initialize runtime state for UI control
+        self.runtime_state = initialize_runtime_state(self.config_obj)
+        
+        # Initialize trade storage
+        self.trade_storage = get_trade_storage()
+        
+        # Initialize polling for QC integration (if enabled)
+        self.poller = None
+        if self.config_obj.trading.ui.admin_api.enabled:
+            try:
+                admin_api_config = self.config_obj.trading.ui.admin_api
+                self.poller = RuntimeStatePoller(
+                    base_url=admin_api_config.host,
+                    port=admin_api_config.port,
+                    timeout=3,
+                    retry_attempts=2
+                )
+                self.last_poll_time = datetime.now()
+                self.polling_interval = timedelta(seconds=admin_api_config.polling_interval_sec)
+                self.Log(f"QC polling initialized for {admin_api_config.host}:{admin_api_config.port}")
+            except Exception as e:
+                self.Log(f"Failed to initialize QC polling: {e}")
+                self.poller = None
+        
         # Initialize strategies
         self.strategies = {
             'scalper_sigma': ScalperSigmaStrategy(self.config),
@@ -100,11 +127,26 @@ class MainAlgo(QCAlgorithm):
         self.last_portfolio_value = self.GetPortfolio().TotalPortfolioValue
         self.performance_metrics = {}
         
-        # Schedule periodic tasks
+        # Schedule periodic tasks  
         self.Schedule.On(
             self.DateRules.EveryDay("SPY"),
             self.TimeRules.At(9, 30),
             self.DailyRebalance
+        )
+        
+        # Schedule runtime state polling (if enabled)
+        if self.poller:
+            self.Schedule.On(
+                self.DateRules.EveryDay(),
+                self.TimeRules.Every(timedelta(minutes=2)),  # Poll every 2 minutes
+                self.PollRuntimeState
+            )
+        
+        # Schedule equity recording
+        self.Schedule.On(
+            self.DateRules.EveryDay(),
+            self.TimeRules.Every(timedelta(hours=1)),  # Record equity hourly
+            self.RecordEquitySnapshot
         )
         
         self.Log("MainAlgo initialized successfully")
@@ -198,6 +240,27 @@ class MainAlgo(QCAlgorithm):
             self.Log(f"Failed to send fill alert: {e}")
         
         self.Log(f"ORDER FILLED: {symbol} {fill_quantity} @ {fill_price}")
+        
+        # Record trade in storage
+        try:
+            trade_data = {
+                "time": self.Time.isoformat(),
+                "symbol": symbol,
+                "side": "BUY" if fill_quantity > 0 else "SELL",
+                "qty": abs(fill_quantity),
+                "avg_price": fill_price,
+                "fees": 0.0,  # TODO: Calculate actual fees
+                "slippage_bps": 0.0,  # TODO: Calculate slippage
+                "pnl": 0.0,  # TODO: Calculate unrealized P&L
+                "meta": {
+                    "order_id": order.Id,
+                    "algorithm": "MainAlgo",
+                    "regime": getattr(self.strategy_manager, 'current_regime', 'unknown')
+                }
+            }
+            self.trade_storage.record_fill(trade_data)
+        except Exception as e:
+            self.Log(f"Failed to record trade: {e}")
     
     def _handle_partial_fill(self, orderEvent, order):
         """Handle partial order fills."""
@@ -455,6 +518,22 @@ class MainAlgo(QCAlgorithm):
     def _execute_strategy_signals(self, symbol_str: str, strategy_signals: Dict[str, Any], market_conditions: Dict[str, Any]):
         """Execute trades based on strategy signals using StrategyManager."""
         
+        # Check runtime state before processing
+        if self.runtime_state.trading_paused or self.runtime_state.kill_switch_active:
+            self.Debug(f"Trading paused - skipping signals for {symbol_str}")
+            return
+        
+        # Filter signals based on strategy enabled state
+        filtered_signals = {}
+        for strategy_name, signal_info in strategy_signals.items():
+            if self._should_process_strategy(strategy_name):
+                filtered_signals[strategy_name] = signal_info
+            else:
+                self.Debug(f"Strategy {strategy_name} disabled - skipping signal")
+        
+        if not filtered_signals:
+            return
+        
         # Get current position
         symbol = self.symbols.get(symbol_str)
         if symbol is None:
@@ -463,9 +542,18 @@ class MainAlgo(QCAlgorithm):
         current_quantity = self.Portfolio[symbol].Quantity
         current_price = self.Securities[symbol].Price
         
+        # Get updated risk parameters from runtime state
+        risk_params = self._get_current_risk_params()
+        
+        # Update risk manager with current parameters if changed
+        if risk_params:
+            for param, value in risk_params.items():
+                if hasattr(self.risk_manager, param):
+                    setattr(self.risk_manager, param, value)
+        
         # Prepare signals by strategy format for StrategyManager
         signals_by_strategy = {}
-        for strategy_name, signal_info in strategy_signals.items():
+        for strategy_name, signal_info in filtered_signals.items():
             if abs(signal_info.get('signal', 0)) > 0:
                 signals_by_strategy[strategy_name] = {
                     symbol_str: {
@@ -504,12 +592,15 @@ class MainAlgo(QCAlgorithm):
         self.Log(f"{symbol_str}: Primary prob={primary_prob:.3f}, Meta prob={meta_prob:.3f}, "
                 f"Strategy={signal_info.get('strategy', 'unknown')}, Signal ACCEPTED")
         
-        # Calculate position size
+        # Calculate position size using updated risk parameters
         atr = strategy_signals[list(strategy_signals.keys())[0]].get('atr', 0.01)
         equity = float(self.Portfolio.TotalPortfolioValue)
         
         # Use target weight from strategy manager
         target_weight = signal_info['target_weight']
+        
+        # Use current risk parameters for position sizing
+        per_trade_risk = risk_params.get('per_trade_risk_pct', 0.01)
         
         base_size = self.risk_manager.calculate_position_size(
             symbol_str, current_price, current_price * 0.95, equity, atr
@@ -521,13 +612,18 @@ class MainAlgo(QCAlgorithm):
         if abs(size_delta) < 1:  # Minimum trade size
             return
         
-        # Risk management checks
+        # Risk management checks with updated parameters
         can_trade, reason = self.risk_manager.check_risk_limits(
             symbol_str, size_delta, current_price, equity
         )
         
         if not can_trade:
             self.Log(f"Risk limits prevent trade for {symbol_str}: {reason}")
+            return
+        
+        # Final runtime state check before execution
+        if self.runtime_state.trading_paused or self.runtime_state.kill_switch_active:
+            self.Debug("Trading paused during execution - aborting trade")
             return
         
         # Execution decision
@@ -685,3 +781,98 @@ class MainAlgo(QCAlgorithm):
                     f"{stats.get('active_positions', 0)} active positions")
         
         self.Log("Algorithm completed successfully")
+    
+    def PollRuntimeState(self):
+        """Poll for runtime state updates from Admin API."""
+        if not self.poller:
+            return
+        
+        try:
+            # Check if it's time to poll
+            current_time = datetime.now()
+            if current_time - self.last_poll_time < self.polling_interval:
+                return
+            
+            # Fetch runtime state
+            runtime_state_data = self.poller.fetch(jitter=True)
+            
+            if runtime_state_data:
+                # Apply updates to local runtime state
+                success = self.runtime_state.apply_patch(runtime_state_data)
+                
+                if success:
+                    self.Debug("Runtime state updated from Admin API")
+                    
+                    # Update regime if provided
+                    if 'last_regime' in runtime_state_data:
+                        self.runtime_state.update_regime(runtime_state_data['last_regime'])
+                    
+                    # Update heartbeat
+                    self.runtime_state.heartbeat()
+                else:
+                    self.Log("Failed to apply runtime state patch")
+            else:
+                self.Debug("No runtime state data received")
+            
+            self.last_poll_time = current_time
+            
+        except Exception as e:
+            self.Log(f"Runtime state polling error: {e}")
+    
+    def RecordEquitySnapshot(self):
+        """Record current equity snapshot to storage."""
+        try:
+            portfolio_value = float(self.Portfolio.TotalPortfolioValue)
+            
+            # Calculate drawdown
+            current_drawdown = 0.0
+            if hasattr(self.risk_manager, 'get_risk_metrics'):
+                risk_metrics = self.risk_manager.get_risk_metrics()
+                current_drawdown = risk_metrics.get('current_drawdown', 0.0)
+            
+            # Calculate realized volatility (simplified)
+            realized_vol = 0.0
+            if self.last_portfolio_value > 0:
+                daily_return = (portfolio_value - self.last_portfolio_value) / self.last_portfolio_value
+                realized_vol = abs(daily_return) * (252 ** 0.5)  # Annualized
+            
+            # Record to storage
+            self.trade_storage.record_equity(
+                ts=self.Time.isoformat(),
+                equity=portfolio_value,
+                drawdown=current_drawdown,
+                realized_vol=realized_vol
+            )
+            
+            self.Debug(f"Recorded equity snapshot: ${portfolio_value:,.2f}")
+            
+        except Exception as e:
+            self.Log(f"Failed to record equity snapshot: {e}")
+    
+    def OnData(self, data):
+        """Main data processing method - enhanced with runtime state checks."""
+        try:
+            # Check if trading is paused via runtime state
+            if self.runtime_state.trading_paused or self.runtime_state.kill_switch_active:
+                self.Debug("Trading paused via runtime state")
+                return
+            
+            # Update market regime in runtime state if detected
+            if hasattr(self.strategy_manager, 'current_regime'):
+                current_regime = getattr(self.strategy_manager, 'current_regime', 'unknown')
+                if current_regime != self.runtime_state.last_regime:
+                    self.runtime_state.update_regime(current_regime)
+            
+            # Continue with normal processing...
+            super().OnData(data)
+            
+        except Exception as e:
+            self.Log(f"Error in OnData: {e}")
+    
+    def _should_process_strategy(self, strategy_name: str) -> bool:
+        """Check if strategy should be processed based on runtime state."""
+        return self.runtime_state.get_strategy_enabled(strategy_name)
+    
+    def _get_current_risk_params(self) -> Dict[str, float]:
+        """Get current risk parameters from runtime state."""
+        return self.runtime_state.risk_params
