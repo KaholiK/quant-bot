@@ -41,16 +41,24 @@ class QuantBotAuditor:
             "algos/core/risk.py",
             "algos/core/portfolio.py",
             "algos/core/exec_rl.py",
+            "algos/core/runtime_state.py",
+            "algos/core/polling.py",
+            "storage/trades.py",
+            "services/admin_api.py",
+            "bots/discord_bot.py",
             "algos/strategies/scalper_sigma.py",
             "algos/strategies/trend_breakout.py",
             "algos/strategies/bull_mode.py",
             "algos/strategies/market_neutral.py",
             "algos/strategies/gamma_reversal.py",
             "notebooks/train_classifier.ipynb",
-            "notebooks/train_ppo.ipynb",
+            "notebooks/train_ppo.ipynb",  
             "tests/test_triple_barrier.py",
             "tests/test_purged_cv.py",
-            "tests/test_risk_engine.py"
+            "tests/test_risk_engine.py",
+            ".env.example",
+            "models/.gitkeep",
+            "policies/.gitkeep"
         ]
         
         for file_path in required_files:
@@ -121,12 +129,28 @@ class QuantBotAuditor:
                     self.add_result("Config", "trading.strategies", "PASS")
                 else:
                     self.add_result("Config", "trading.strategies", "FAIL")
+                    
+                # Validate new UI section
+                if hasattr(self.config_obj.trading, 'ui'):
+                    self.add_result("Config", "trading.ui", "PASS")
+                    
+                    if hasattr(self.config_obj.trading.ui, 'discord'):
+                        self.add_result("Config", "trading.ui.discord", "PASS")
+                    else:
+                        self.add_result("Config", "trading.ui.discord", "FAIL")
+                        
+                    if hasattr(self.config_obj.trading.ui, 'admin_api'):
+                        self.add_result("Config", "trading.ui.admin_api", "PASS")
+                    else:
+                        self.add_result("Config", "trading.ui.admin_api", "FAIL")
+                else:
+                    self.add_result("Config", "trading.ui", "FAIL")
             else:
                 self.add_result("Config", "trading section", "FAIL")
             
             # Print normalized config
             print("\n=== VALIDATED CONFIG ===")
-            config_dict = self.config_obj.dict()
+            config_dict = self.config_obj.model_dump()
             print(yaml.dump(config_dict, default_flow_style=False, indent=2))
             print("=" * 25)
             
@@ -155,7 +179,15 @@ class QuantBotAuditor:
             "algos.core.cv_utils",
             "algos.core.risk",
             "algos.core.portfolio",
-            "algos.core.exec_rl"
+            "algos.core.exec_rl",
+            "algos.core.runtime_state",
+            "algos.core.polling"
+        ]
+        
+        ui_modules = [
+            "storage.trades",
+            "services.admin_api",
+            "bots.discord_bot"
         ]
         
         strategy_modules = [
@@ -169,6 +201,7 @@ class QuantBotAuditor:
         # Add repo root to Python path for imports
         sys.path.insert(0, str(self.repo_root))
         
+        # Test core modules
         for module_name in core_modules + strategy_modules:
             try:
                 # Try to import the module
@@ -189,6 +222,27 @@ class QuantBotAuditor:
                     self.add_result("Imports", module_name, f"FAIL: {e}")
             except Exception as e:
                 self.add_result("Imports", module_name, f"FAIL: {e}")
+        
+        # Test UI modules with special handling for optional dependencies
+        for module_name in ui_modules:
+            try:
+                spec = importlib.util.find_spec(module_name)
+                if spec is None:
+                    self.add_result("UI-Imports", module_name, "FAIL: Module not found")
+                    continue
+                    
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                self.add_result("UI-Imports", module_name, "PASS")
+                
+            except ImportError as e:
+                # UI dependencies might not be available in CI
+                if any(dep in str(e) for dep in ["fastapi", "discord", "uvicorn", "prometheus_client"]):
+                    self.add_result("UI-Imports", module_name, "SKIP: UI dependencies not installed")
+                else:
+                    self.add_result("UI-Imports", module_name, f"FAIL: {e}")
+            except Exception as e:
+                self.add_result("UI-Imports", module_name, f"FAIL: {e}")
                 
     def generate_report(self) -> str:
         """Generate audit report as markdown table."""
