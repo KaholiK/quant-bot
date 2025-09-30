@@ -4,32 +4,29 @@ Provides REST endpoints for control, monitoring, and data export.
 """
 
 import os
-import asyncio
 import subprocess
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Depends, Security, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, Security
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from loguru import logger
+from prometheus_client import Counter, Gauge, Histogram, generate_latest
+from pydantic import BaseModel, Field
 
 # Import our modules
 from algos.core.runtime_state import get_runtime_state
 from storage.trades import get_trade_storage
 
-
 # Prometheus metrics
-REQUEST_COUNT = Counter('admin_api_requests_total', 'Total requests', ['method', 'endpoint'])
-REQUEST_DURATION = Histogram('admin_api_request_duration_seconds', 'Request duration')
-ACTIVE_STRATEGIES = Gauge('trading_active_strategies', 'Number of active strategies')
-EQUITY_VALUE = Gauge('trading_equity_value', 'Current equity value')
-DRAWDOWN_PCT = Gauge('trading_drawdown_percent', 'Current drawdown percentage')
+REQUEST_COUNT = Counter("admin_api_requests_total", "Total requests", ["method", "endpoint"])
+REQUEST_DURATION = Histogram("admin_api_request_duration_seconds", "Request duration")
+ACTIVE_STRATEGIES = Gauge("trading_active_strategies", "Number of active strategies")
+EQUITY_VALUE = Gauge("trading_equity_value", "Current equity value")
+DRAWDOWN_PCT = Gauge("trading_drawdown_percent", "Current drawdown percentage")
 
 
 # Request/Response models
@@ -44,13 +41,13 @@ class StrategyToggleRequest(BaseModel):
 
 
 class KillSwitchRequest(BaseModel):
-    reason: Optional[str] = Field(default="Manual kill switch", description="Reason for kill switch")
+    reason: str | None = Field(default="Manual kill switch", description="Reason for kill switch")
 
 
 class TradeFilters(BaseModel):
-    symbol: Optional[str] = None
-    start: Optional[str] = None
-    end: Optional[str] = None
+    symbol: str | None = None
+    start: str | None = None
+    end: str | None = None
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=100, ge=1, le=1000)
 
@@ -63,12 +60,12 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Security(security))
     """Verify admin token for mutating endpoints."""
     if not credentials:
         return False
-    
+
     admin_token = os.getenv("ADMIN_TOKEN")
     if not admin_token:
         logger.warning("ADMIN_TOKEN not configured, rejecting request")
         return False
-    
+
     return credentials.credentials == admin_token
 
 
@@ -103,15 +100,15 @@ if templates_dir.exists():
 async def metrics_middleware(request: Request, call_next):
     """Middleware to collect request metrics."""
     start_time = datetime.utcnow()
-    
+
     REQUEST_COUNT.labels(
         method=request.method,
         endpoint=request.url.path
     ).inc()
-    
+
     with REQUEST_DURATION.time():
         response = await call_next(request)
-    
+
     return response
 
 
@@ -133,10 +130,10 @@ async def get_status():
     try:
         runtime_state = get_runtime_state()
         trade_storage = get_trade_storage()
-        
+
         # Get trade statistics
         trade_stats = trade_storage.get_trade_stats()
-        
+
         # Get equity curve (last 30 days)
         end_time = datetime.utcnow()
         start_time = end_time - timedelta(days=30)
@@ -144,17 +141,17 @@ async def get_status():
             start_time=start_time.isoformat(),
             end_time=end_time.isoformat()
         )
-        
+
         # Calculate current metrics
         current_equity = trade_stats.get("latest_equity", 0.0)
         current_drawdown = trade_stats.get("latest_drawdown", 0.0)
         active_strategies = sum(1 for enabled in runtime_state.strategy_enabled.values() if enabled)
-        
+
         # Update Prometheus metrics
         EQUITY_VALUE.set(current_equity)
         DRAWDOWN_PCT.set(current_drawdown * 100)
         ACTIVE_STRATEGIES.set(active_strategies)
-        
+
         return {
             "trading_paused": runtime_state.trading_paused,
             "kill_switch_active": runtime_state.kill_switch_active,
@@ -170,7 +167,7 @@ async def get_status():
             "total_pnl": trade_stats.get("total_pnl", 0.0),
             "last_update": runtime_state.to_dict().get("last_update"),
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
         raise HTTPException(status_code=500, detail="Failed to get status")
@@ -193,23 +190,23 @@ async def update_risk(request: RiskUpdateRequest, _: bool = Depends(require_auth
     """Update risk parameter."""
     try:
         runtime_state = get_runtime_state()
-        
+
         patch = {
             "risk_params": {
                 request.key: request.value
             }
         }
-        
+
         success = runtime_state.apply_patch(patch)
         if not success:
             raise HTTPException(status_code=400, detail="Failed to apply risk update")
-        
+
         return {
             "success": True,
             "message": f"Updated {request.key} to {request.value}",
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -222,24 +219,24 @@ async def toggle_strategy(request: StrategyToggleRequest, _: bool = Depends(requ
     """Toggle strategy on/off."""
     try:
         runtime_state = get_runtime_state()
-        
+
         patch = {
             "strategy_enabled": {
                 request.name: request.enabled
             }
         }
-        
+
         success = runtime_state.apply_patch(patch)
         if not success:
             raise HTTPException(status_code=400, detail="Failed to toggle strategy")
-        
+
         status = "enabled" if request.enabled else "disabled"
         return {
             "success": True,
             "message": f"Strategy {request.name} {status}",
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -253,13 +250,13 @@ async def activate_kill_switch(request: KillSwitchRequest, _: bool = Depends(req
     try:
         runtime_state = get_runtime_state()
         runtime_state.mark_kill(request.reason)
-        
+
         return {
             "success": True,
             "message": f"Kill switch activated: {request.reason}",
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to activate kill switch: {e}")
         raise HTTPException(status_code=500, detail="Failed to activate kill switch")
@@ -271,13 +268,13 @@ async def resume_trading(_: bool = Depends(require_auth)):
     try:
         runtime_state = get_runtime_state()
         runtime_state.resume()
-        
+
         return {
             "success": True,
             "message": "Trading resumed - kill switch deactivated",
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to resume trading: {e}")
         raise HTTPException(status_code=500, detail="Failed to resume trading")
@@ -295,19 +292,18 @@ async def retrain_now(_: bool = Depends(require_auth)):
                 "--config", "config.yaml",
                 "--output-dir", "models_new"
             ])
-            
+
             return {
                 "success": True,
                 "message": "Model retraining started in background",
                 "timestamp": datetime.utcnow().isoformat()
             }
-        else:
-            return {
-                "success": False,
-                "message": "Use retrain workflow - not available in this environment",
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
+        return {
+            "success": False,
+            "message": "Use retrain workflow - not available in this environment",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
     except Exception as e:
         logger.error(f"Failed to start retraining: {e}")
         raise HTTPException(status_code=500, detail="Failed to start retraining")
@@ -316,19 +312,19 @@ async def retrain_now(_: bool = Depends(require_auth)):
 # Data endpoints
 @app.get("/trades")
 async def get_trades(
-    symbol: Optional[str] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
+    symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
     page: int = 1,
     page_size: int = 100
 ):
     """Get trades with optional filters."""
     try:
         trade_storage = get_trade_storage()
-        
+
         # Calculate offset for pagination
         offset = (page - 1) * page_size
-        
+
         trades = trade_storage.list_trades(
             symbol=symbol,
             start_time=start,
@@ -336,14 +332,14 @@ async def get_trades(
             limit=page_size,
             offset=offset
         )
-        
+
         return {
             "trades": trades,
             "page": page,
             "page_size": page_size,
             "has_more": len(trades) == page_size
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to get trades: {e}")
         raise HTTPException(status_code=500, detail="Failed to get trades")
@@ -351,20 +347,20 @@ async def get_trades(
 
 @app.get("/trades/export.csv")
 async def export_trades_csv(
-    symbol: Optional[str] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
+    symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
     _: bool = Depends(require_auth)
 ):
     """Export trades to CSV file."""
     try:
         trade_storage = get_trade_storage()
-        
+
         # Generate filename with timestamp
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         filename = f"trades_{timestamp}.csv"
         output_path = f"exports/{filename}"
-        
+
         # Export trades
         success = trade_storage.export_trades_csv(
             output_path,
@@ -372,16 +368,16 @@ async def export_trades_csv(
             start_time=start,
             end_time=end
         )
-        
+
         if not success:
             raise HTTPException(status_code=404, detail="No trades to export")
-        
+
         return FileResponse(
             path=output_path,
             filename=filename,
             media_type="text/csv"
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -391,20 +387,20 @@ async def export_trades_csv(
 
 @app.get("/trades/export.parquet")
 async def export_trades_parquet(
-    symbol: Optional[str] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
+    symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
     _: bool = Depends(require_auth)
 ):
     """Export trades to Parquet file."""
     try:
         trade_storage = get_trade_storage()
-        
+
         # Generate filename with timestamp
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         filename = f"trades_{timestamp}.parquet"
         output_path = f"exports/{filename}"
-        
+
         # Export trades
         success = trade_storage.export_trades_parquet(
             output_path,
@@ -412,16 +408,16 @@ async def export_trades_parquet(
             start_time=start,
             end_time=end
         )
-        
+
         if not success:
             raise HTTPException(status_code=404, detail="No trades to export")
-        
+
         return FileResponse(
             path=output_path,
             filename=filename,
             media_type="application/octet-stream"
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -431,23 +427,23 @@ async def export_trades_parquet(
 
 @app.get("/equity_curve.json")
 async def get_equity_curve(
-    start: Optional[str] = None,
-    end: Optional[str] = None
+    start: str | None = None,
+    end: str | None = None
 ):
     """Get equity curve data."""
     try:
         trade_storage = get_trade_storage()
-        
+
         equity_data = trade_storage.get_equity_curve(
             start_time=start,
             end_time=end
         )
-        
+
         return {
             "data": equity_data,
             "count": len(equity_data)
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to get equity curve: {e}")
         raise HTTPException(status_code=500, detail="Failed to get equity curve")
@@ -469,7 +465,7 @@ async def dashboard(request: Request):
     """Main dashboard page."""
     if not templates_dir.exists():
         return {"message": "Dashboard templates not available"}
-    
+
     return templates.TemplateResponse("index.html", {"request": request})
 
 
@@ -478,7 +474,7 @@ async def trades_page(request: Request):
     """Trades blotter page."""
     if not templates_dir.exists():
         return {"message": "Dashboard templates not available"}
-    
+
     return templates.TemplateResponse("trades.html", {"request": request})
 
 
@@ -501,13 +497,13 @@ async def internal_error_handler(request: Request, exc: HTTPException):
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     # Get configuration from environment
     host = os.getenv("ADMIN_API_HOST", "0.0.0.0")
     port = int(os.getenv("ADMIN_API_PORT", "8080"))
-    
+
     logger.info(f"Starting Admin API on {host}:{port}")
-    
+
     uvicorn.run(
         "services.admin_api:app",
         host=host,

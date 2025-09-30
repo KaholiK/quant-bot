@@ -1,5 +1,5 @@
 """Adapters for broker and data portability."""
 
-from .broker import BrokerAdapter, QuantConnectAdapter, OrderType, OrderStatus, Order
+from .broker import BrokerAdapter, Order, OrderStatus, OrderType, QuantConnectAdapter
 
-__all__ = ['BrokerAdapter', 'QuantConnectAdapter', 'OrderType', 'OrderStatus', 'Order']
+__all__ = ["BrokerAdapter", "Order", "OrderStatus", "OrderType", "QuantConnectAdapter"]

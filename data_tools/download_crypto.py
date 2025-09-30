@@ -3,10 +3,10 @@
 CLI tool to download crypto OHLCV data and cache to Parquet.
 """
 
-import sys
 import argparse
-from pathlib import Path
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 # Add parent to path
@@ -14,15 +14,19 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from loguru import logger
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from config.settings import settings
 from data.cache_io import get_cache
 from data_providers.coingecko_client import CoinGeckoClient
 from data_tools.validate import (
-    tz_to_utc, drop_duplicates, assert_monotonic_ts,
-    align_to_bar, forbid_forward_fill_leakage, validate_ohlcv
+    align_to_bar,
+    assert_monotonic_ts,
+    drop_duplicates,
+    forbid_forward_fill_leakage,
+    tz_to_utc,
+    validate_ohlcv,
 )
 
 console = Console()
@@ -52,15 +56,15 @@ def download_crypto(
     else:
         console.print(f"[red]❌ Unsupported provider: {provider}[/red]")
         sys.exit(1)
-    
+
     cache = get_cache()
-    
-    console.print(f"\n[bold cyan]Downloading Crypto Data[/bold cyan]")
+
+    console.print("\n[bold cyan]Downloading Crypto Data[/bold cyan]")
     console.print(f"Provider: {provider}")
     console.print(f"Symbols: {', '.join(symbols)}")
     console.print(f"Range: {start.date()} to {end.date()}")
     console.print(f"Interval: {interval}\n")
-    
+
     # Create progress bar
     with Progress(
         SpinnerColumn(),
@@ -69,12 +73,12 @@ def download_crypto(
         TaskProgressColumn(),
         console=console
     ) as progress:
-        
+
         task = progress.add_task("Downloading...", total=len(symbols))
-        
+
         for symbol in symbols:
             progress.update(task, description=f"Fetching {symbol}...")
-            
+
             try:
                 # Fetch data
                 df = client.fetch_ohlcv(
@@ -84,51 +88,51 @@ def download_crypto(
                     start=start,
                     end=end
                 )
-                
+
                 if df.empty:
                     console.print(f"[yellow]⚠️  No data for {symbol}[/yellow]")
                     progress.advance(task)
                     continue
-                
+
                 # Validate and clean
-                df = tz_to_utc(df, 'ts')
-                df = drop_duplicates(df, 'ts', keep='last')
+                df = tz_to_utc(df, "ts")
+                df = drop_duplicates(df, "ts", keep="last")
                 df = validate_ohlcv(df)
-                df = align_to_bar(df, interval, 'ts', tolerance_seconds=300)
+                df = align_to_bar(df, interval, "ts", tolerance_seconds=300)
                 df = forbid_forward_fill_leakage(df, max_gap_bars=5, interval=interval)
-                assert_monotonic_ts(df, 'ts')
-                
+                assert_monotonic_ts(df, "ts")
+
                 # Save to cache
-                cache.save_parquet(df, asset='crypto', symbol=symbol, interval=interval)
-                
+                cache.save_parquet(df, asset="crypto", symbol=symbol, interval=interval)
+
                 console.print(f"[green]✅ {symbol}: {len(df)} bars saved[/green]")
-                
+
             except Exception as e:
                 console.print(f"[red]❌ {symbol}: {e}[/red]")
                 logger.exception(f"Failed to download {symbol}")
-            
+
             progress.advance(task)
-    
+
     # Print coverage report
     console.print("\n[bold cyan]Coverage Report:[/bold cyan]")
-    
+
     coverage_table = Table(show_header=True, header_style="bold cyan")
     coverage_table.add_column("Symbol", style="dim")
     coverage_table.add_column("Status")
     coverage_table.add_column("Coverage")
     coverage_table.add_column("Bars")
     coverage_table.add_column("Expected")
-    
+
     for symbol in symbols:
         has_cov, cov_ratio, actual, expected = cache.has_coverage(
-            asset='crypto',
+            asset="crypto",
             symbol=symbol,
             interval=interval,
             start=start,
             end=end,
             min_coverage=0.95
         )
-        
+
         status = "✅" if has_cov else ("⚠️" if cov_ratio > 0 else "❌")
         coverage_table.add_row(
             symbol,
@@ -137,7 +141,7 @@ def download_crypto(
             str(actual),
             str(expected)
         )
-    
+
     console.print(coverage_table)
     console.print()
 
@@ -172,9 +176,9 @@ def main() -> int:
         default="1h",
         help="Time interval"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Parse dates
     try:
         start = datetime.strptime(args.start, "%Y-%m-%d")
@@ -182,10 +186,10 @@ def main() -> int:
     except ValueError as e:
         console.print(f"[red]❌ Invalid date format: {e}[/red]")
         return 1
-    
+
     # Parse symbols
-    symbols = [s.strip().lower() for s in args.symbols.split(',')]
-    
+    symbols = [s.strip().lower() for s in args.symbols.split(",")]
+
     # Download
     try:
         download_crypto(
