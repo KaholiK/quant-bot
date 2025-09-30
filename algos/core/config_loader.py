@@ -7,7 +7,7 @@ from typing import Dict, Any, List, Optional, Union
 import yaml
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, validator, root_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,26 @@ class ExecutionConfig(BaseModel):
     use_vector_env: bool = Field(default=True, description="Use vectorized environment for RL training")
 
 
+class DiscordConfig(BaseModel):
+    """Discord bot configuration."""
+    enabled: bool = Field(default=True, description="Enable Discord bot")
+    guild_id: int = Field(default=0, description="Discord guild ID")
+
+
+class AdminApiConfig(BaseModel):
+    """Admin API configuration."""
+    enabled: bool = Field(default=True, description="Enable admin API")
+    host: str = Field(default="0.0.0.0", description="API host")
+    port: int = Field(default=8080, ge=1, le=65535, description="API port")
+    polling_interval_sec: int = Field(default=120, ge=30, description="Polling interval for QC integration")
+
+
+class UIConfig(BaseModel):
+    """UI configuration."""
+    discord: DiscordConfig = DiscordConfig()
+    admin_api: AdminApiConfig = AdminApiConfig()
+
+
 class TradingConfig(BaseModel):
     """Main trading configuration."""
     universe: UniverseConfig = UniverseConfig()
@@ -150,14 +170,23 @@ class TradingConfig(BaseModel):
     strategies: StrategiesConfig = StrategiesConfig()
     learning: LearningConfig = LearningConfig()
     execution: ExecutionConfig = ExecutionConfig()
+    strategy_priority_by_regime: Dict[str, List[str]] = Field(
+        default={
+            "trend": ["trend_breakout", "bull_mode", "scalper_sigma", "market_neutral", "gamma_reversal"],
+            "chop": ["scalper_sigma", "market_neutral", "gamma_reversal", "trend_breakout", "bull_mode"],
+            "high-vol": ["scalper_sigma", "gamma_reversal", "trend_breakout", "market_neutral", "bull_mode"],
+            "low-vol": ["trend_breakout", "bull_mode", "market_neutral", "scalper_sigma", "gamma_reversal"]
+        },
+        description="Strategy priority by market regime"
+    )
+    ui: UIConfig = UIConfig()
 
 
 class QuantBotConfig(BaseModel):
     """Root configuration model."""
     trading: TradingConfig = TradingConfig()
     
-    class Config:
-        extra = "allow"  # Allow additional fields for backward compatibility
+    model_config = {"extra": "allow"}  # Allow additional fields for backward compatibility
 
 
 def _normalize_legacy_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -273,12 +302,12 @@ def load_config(path: str = "config.yaml") -> QuantBotConfig:
     normalized_config = _normalize_legacy_config(raw_config)
     
     try:
-        config = QuantBotConfig.parse_obj(normalized_config)
+        config = QuantBotConfig.model_validate(normalized_config)
     except Exception as e:
         raise ValueError(f"Configuration validation failed: {e}")
     
     # Log redacted configuration (remove sensitive fields)
-    redacted_dict = config.dict(exclude={"models": {"classifier_path", "meta_model_path", "rl_policy_path"}})
+    redacted_dict = config.model_dump(exclude={"trading": {"models": {"classifier_path", "meta_model_path", "rl_policy_path"}}})
     logger.info(f"Loaded configuration: {redacted_dict}")
     
     return config
@@ -294,7 +323,7 @@ def get_legacy_dict(config: QuantBotConfig) -> Dict[str, Any]:
     Returns:
         Legacy format dictionary
     """
-    config_dict = config.dict()
+    config_dict = config.model_dump()
     
     # Flatten trading section for legacy compatibility
     result = {}
