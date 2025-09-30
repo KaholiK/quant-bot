@@ -864,7 +864,7 @@ class MainAlgo(QCAlgorithm):
                     self.runtime_state.update_regime(current_regime)
             
             # Continue with normal processing...
-            super().OnData(data) if hasattr(super(), 'OnData') else None
+            super().OnData(data)
             
         except Exception as e:
             self.Log(f"Error in OnData: {e}")
