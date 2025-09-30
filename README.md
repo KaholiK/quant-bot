@@ -21,9 +21,89 @@ A sophisticated Python 3.11 quantitative trading bot for QuantConnect LEAN with 
 - **📊 Production Monitoring**: Discord alerts, comprehensive logging, performance tracking
 - **🛡️ Robust Architecture**: Type-safe configuration, broker adapters, comprehensive testing
 
+## 📦 Quickstart: Paper Trading in 5 Steps
+
+Get up and running with paper trading and Discord control in minutes:
+
+### 1. Install
+```bash
+git clone https://github.com/KaholiK/quant-bot.git
+cd quant-bot
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+### 2. Configure Environment
+```bash
+cp .env.example .env
+# Edit .env - minimum required:
+# - Add DISCORD_BOT_TOKEN (from Discord Developer Portal)
+# - Add DISCORD_GUILD_ID (your Discord server ID)
+# - Add DISCORD_REPORTS_CHANNEL_ID (channel for reports)
+# - Add at least one data provider key (TIINGO_API_KEY or COINGECKO_API_KEY)
+
+# Verify configuration
+python -m scripts.env_smoke
+```
+
+### 3. Initialize Database & Download Data
+```bash
+# Initialize database (SQLite by default)
+make db.init
+
+# Download sample data
+make data.crypto      # BTC/ETH hourly data (Jan-Sep 2024)
+make data.equities    # SPY/AAPL daily data (2023-2024)
+```
+
+### 4. Run Backtest
+```bash
+# Quick backtest with cached data
+make backtest.quick
+
+# Or manual:
+python -m apps.backtest.run_backtest \
+    --start 2024-01-01 \
+    --end 2024-06-01 \
+    --universe SPY,AAPL \
+    --interval 1d
+```
+
+### 5. Start Discord Bot
+```bash
+# Start Discord control bot
+python -m ui.discord_bot.main
+
+# In Discord, try:
+# /envcheck - Check configuration
+# /pnl 1w - Show P&L for last week
+# /trades 20 - Show recent trades
+```
+
+**Next Steps:**
+- Run paper trading: `make paper.quick`
+- See [SETUP_ENV.md](SETUP_ENV.md) for detailed configuration
+- See [DATA_SETUP.md](DATA_SETUP.md) for data provider setup
+- See [OBSERVABILITY.md](OBSERVABILITY.md) for monitoring guide
+
 ## 📋 Changelog
 
-### v3.0.0 - Discord-First UI (Latest)
+### v4.0.0 - Production-Grade Paper Trading Infrastructure (Latest)
+- **🏗️ Production Config**: Pydantic-settings with full environment validation and masked secret display
+- **📊 Data Infrastructure**: Parquet-based caching, multi-provider support (Tiingo, CoinGecko), validation pipeline
+- **💾 SQLAlchemy 2.0 Database**: PostgreSQL/SQLite with Run, Order, Fill, EquityPoint, Metric, ErrorLog models
+- **📱 Enhanced Discord Bot**: Slash commands for /envcheck, /pnl, /trades, /halt with chart generation
+- **📈 Backtest Runner**: Simple buy-and-hold backtest with KPI calculation (Sharpe, Sortino, maxDD)
+- **🎮 Paper Trading**: Simulated trading loop with halt flag, equity tracking, progress display
+- **🔬 W&B Integration**: Optional Weights & Biases telemetry for experiment tracking
+- **🤖 OpenAI Narration**: Optional AI-generated summaries with fallback to concise text
+- **📝 Comprehensive Docs**: SETUP_ENV.md, DATA_SETUP.md, OBSERVABILITY.md, TROUBLESHOOTING.md
+- **🛠️ Makefile**: Targets for env.smoke, db.init, data downloads, lint, test
+- **⚡ CLI Tools**: download_crypto.py, download_equities.py with progress bars and coverage reports
+- **🔒 Safety First**: Paper-only mode enforced, no live trading endpoints, data leakage prevention
+
+### v3.0.0 - Discord-First UI
 - **📱 Discord Control Bot**: Complete slash command interface for mobile trading control
 - **🖥️ Admin API**: FastAPI dashboard with authentication, Prometheus metrics, and data export
 - **💾 Production Storage**: SQLite with trades, orders, equity tables and CSV/Parquet export
