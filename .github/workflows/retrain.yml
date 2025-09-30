@@ -1,4 +1,4 @@
-name: Model Retraining
+name: Model Retraining with Promotion Gates
 
 on:
   workflow_dispatch:
@@ -8,14 +8,28 @@ on:
         required: false
         default: 'false'
         type: boolean
+      model_type:
+        description: 'Model type to retrain (classifier, ppo, both)'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - classifier
+          - ppo
+      optimization_trials:
+        description: 'Number of Optuna trials for hyperparameter optimization'
+        required: false
+        default: '30'
+        type: string
   schedule:
-    # Run weekly on Sunday at 2 AM UTC
+    # Run weekly on Sunday at 2 AM UTC (when markets are closed)
     - cron: '0 2 * * 0'
 
 jobs:
   retrain:
     runs-on: ubuntu-latest
-    timeout-minutes: 180  # 3 hours max
+    timeout-minutes: 240  # 4 hours max
     
     steps:
     - name: Checkout code
@@ -28,26 +42,262 @@ jobs:
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
+        cache: 'pip'
         
-    - name: Cache pip dependencies
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-retrain-${{ hashFiles('**/pyproject.toml') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-retrain-
-          ${{ runner.os }}-pip-
-          
-    - name: Install dependencies
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential
+        
+    - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -e .
         pip install yfinance requests binance-python stable-baselines3[extra] torch
+        pip install optuna plotly kaleido  # For hyperparameter optimization and plotting
         
     - name: Download LFS files
       run: git lfs pull
       
     - name: Create output directories
+      run: |
+        mkdir -p models_new policies_new reports data/cache
+        echo "models_new/" >> .gitignore || true
+        echo "policies_new/" >> .gitignore || true
+        
+    - name: Train new classifier model
+      if: ${{ github.event.inputs.model_type == 'both' || github.event.inputs.model_type == 'classifier' }}
+      run: |
+        echo "🔄 Training new classifier model..."
+        python scripts/train_classifier.py \
+          --config config.yaml \
+          --output-dir models_new \
+          --cache-dir data/cache \
+          --optimize-params \
+          --n-trials ${{ github.event.inputs.optimization_trials || '30' }} \
+          --parallel \
+          --verbose
+          
+    - name: Train new PPO policy
+      if: ${{ github.event.inputs.model_type == 'both' || github.event.inputs.model_type == 'ppo' }}
+      run: |
+        echo "🔄 Training new PPO policy..."
+        python scripts/train_ppo.py \
+          --config config.yaml \
+          --output-dir policies_new \
+          --n-envs 8 \
+          --total-timesteps 500000 \
+          --optimize-params \
+          --verbose
+          
+    - name: Evaluate new models (Walk-Forward Analysis)
+      run: |
+        echo "📊 Evaluating new models with walk-forward analysis..."
+        python scripts/evaluate_models.py \
+          --old-models-dir models \
+          --new-models-dir models_new \
+          --old-policies-dir policies \
+          --new-policies-dir policies_new \
+          --config config.yaml \
+          --output reports/evaluation_results.json
+          
+    - name: Check promotion gates
+      id: promotion_check
+      run: |
+        echo "🚪 Checking promotion gates..."
+        python scripts/check_promotion_gates.py \
+          --results reports/evaluation_results.json \
+          --config config.yaml \
+          --force ${{ github.event.inputs.force_retrain || 'false' }} \
+          --output reports/promotion_decision.json
+        
+        # Read the promotion decision
+        PROMOTE=$(python -c "
+        import json
+        with open('reports/promotion_decision.json', 'r') as f:
+            data = json.load(f)
+        print('true' if data.get('promote', False) else 'false')
+        ")
+        echo "promote=$PROMOTE" >> $GITHUB_OUTPUT
+        
+        # Read promotion summary for later use
+        SUMMARY=$(python -c "
+        import json
+        with open('reports/promotion_decision.json', 'r') as f:
+            data = json.load(f)
+        print(data.get('summary', 'No summary available'))
+        ")
+        echo "summary<<EOF" >> $GITHUB_OUTPUT
+        echo "$SUMMARY" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+        
+    - name: Create promotion PR
+      if: steps.promotion_check.outputs.promote == 'true'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "feat: promote new models - automated retrain"
+        title: "🚀 Model Promotion: New models passed all gates"
+        body: |
+          ## Model Promotion Summary
+          
+          ${{ steps.promotion_check.outputs.summary }}
+          
+          ### Changes
+          - ✅ New models passed all promotion gates
+          - 📊 Walk-forward evaluation results available in reports/
+          - 🔄 Automated retraining completed successfully
+          
+          ### Review Checklist
+          - [ ] Review evaluation metrics in reports/
+          - [ ] Verify model performance improvements
+          - [ ] Check for any unexpected behavior
+          - [ ] Approve and merge when ready
+          
+          *This PR was created automatically by the retraining workflow.*
+        branch: model-promotion-${{ github.run_number }}
+        delete-branch: true
+        
+    - name: Move new models to production
+      if: steps.promotion_check.outputs.promote == 'true'
+      run: |
+        echo "📦 Moving new models to production directories..."
+        
+        # Backup old models
+        if [ -d "models" ]; then
+          mv models models_backup_$(date +%Y%m%d_%H%M%S)
+        fi
+        if [ -d "policies" ]; then
+          mv policies policies_backup_$(date +%Y%m%d_%H%M%S)
+        fi
+        
+        # Move new models
+        if [ -d "models_new" ]; then
+          mv models_new models
+        fi
+        if [ -d "policies_new" ]; then
+          mv policies_new policies
+        fi
+        
+        echo "✅ Models promoted successfully"
+        
+    - name: Send Discord notification (Success)
+      if: steps.promotion_check.outputs.promote == 'true'
+      run: |
+        if [ -n "${{ secrets.DISCORD_WEBHOOK_URL }}" ]; then
+          python -c "
+          import requests, json
+          from datetime import datetime
+          
+          webhook_url = '${{ secrets.DISCORD_WEBHOOK_URL }}'
+          
+          embed = {
+              'title': '🚀 Model Promotion Successful',
+              'description': 'New models have been promoted to production after passing all gates.',
+              'color': 0x00ff00,
+              'timestamp': datetime.utcnow().isoformat() + 'Z',
+              'fields': [
+                  {'name': 'Workflow', 'value': 'Model Retraining', 'inline': True},
+                  {'name': 'Status', 'value': 'Promoted', 'inline': True},
+                  {'name': 'Run ID', 'value': '${{ github.run_number }}', 'inline': True}
+              ],
+              'footer': {'text': 'Quant Bot Retraining'}
+          }
+          
+          payload = {'embeds': [embed]}
+          requests.post(webhook_url, json=payload, timeout=10)
+          print('Discord notification sent')
+          "
+        fi
+        
+    - name: Send Discord notification (Rejected)
+      if: steps.promotion_check.outputs.promote == 'false'
+      run: |
+        if [ -n "${{ secrets.DISCORD_WEBHOOK_URL }}" ]; then
+          python -c "
+          import requests, json
+          from datetime import datetime
+          
+          webhook_url = '${{ secrets.DISCORD_WEBHOOK_URL }}'
+          
+          embed = {
+              'title': '❌ Model Promotion Rejected',
+              'description': 'New models failed to pass promotion gates and were not promoted.',
+              'color': 0xff0000,
+              'timestamp': datetime.utcnow().isoformat() + 'Z',
+              'fields': [
+                  {'name': 'Workflow', 'value': 'Model Retraining', 'inline': True},
+                  {'name': 'Status', 'value': 'Rejected', 'inline': True},
+                  {'name': 'Run ID', 'value': '${{ github.run_number }}', 'inline': True}
+              ],
+              'footer': {'text': 'Quant Bot Retraining'}
+          }
+          
+          payload = {'embeds': [embed]}
+          requests.post(webhook_url, json=payload, timeout=10)
+          print('Discord rejection notification sent')
+          "
+        fi
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: retrain-results-${{ github.run_number }}
+        path: |
+          reports/
+          models_new/
+          policies_new/
+        retention-days: 30
+        
+    - name: Job summary
+      if: always()
+      run: |
+        echo "## 🤖 Model Retraining Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Run ID:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Timestamp:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ steps.promotion_check.outputs.promote }}" = "true" ]; then
+          echo "### ✅ Promotion Status: APPROVED" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "New models have been promoted to production after passing all gates." >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ❌ Promotion Status: REJECTED" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "New models failed to meet promotion criteria and were not promoted." >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 Details" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "${{ steps.promotion_check.outputs.summary }}" >> $GITHUB_STEP_SUMMARY
+        
+        # Add evaluation results if available
+        if [ -f "reports/evaluation_results.json" ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📈 Key Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          python -c "
+          import json
+          try:
+              with open('reports/evaluation_results.json', 'r') as f:
+                  results = json.load(f)
+              
+              print('| Metric | Current | New | Change |')
+              print('|--------|----------|-----|--------|')
+              
+              for metric, values in results.get('comparison', {}).items():
+                  current = values.get('current', 0)
+                  new = values.get('new', 0)
+                  change = new - current
+                  change_str = f'+{change:.3f}' if change > 0 else f'{change:.3f}'
+                  print(f'| {metric} | {current:.3f} | {new:.3f} | {change_str} |')
+          except:
+              print('Evaluation results not available')
+          " >> $GITHUB_STEP_SUMMARY
+        fi
       run: |
         mkdir -p models_new
         mkdir -p policies_new

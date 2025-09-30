@@ -269,15 +269,74 @@ class ExecutionRL:
                              target_position: float,
                              current_position: float,
                              market_features: Dict[str, float],
-                             atr: float) -> Dict[str, Any]:
+                             atr: float,
+                             regime: str = 'trend',
+                             capacity_flag: bool = False) -> Dict[str, Any]:
         """
-        Get execution decision from RL policy or fallback maker ladder.
+        Get execution decision from RL policy with robust fallbacks and guards.
         
         Args:
             symbol: Trading symbol
             target_position: Target position size
             current_position: Current position size  
             market_features: Market features (spread, vol, etc.)
+            atr: Average True Range for price scaling
+            regime: Current market regime
+            capacity_flag: Whether position is capacity constrained
+            
+        Returns:
+            Dict with execution decision: size_delta, order_type, limit_offset, confidence
+        """
+        # Input validation and guards
+        size_delta = target_position - current_position
+        
+        # Guard: Skip execution if change is too small
+        min_trade_size = market_features.get('min_trade_size', 1.0)
+        if abs(size_delta) < min_trade_size:
+            return {
+                'size_delta': 0.0,
+                'order_type': 'market',
+                'limit_offset': 0.0,
+                'confidence': 1.0,
+                'reason': 'position_change_too_small'
+            }
+        
+        # Guard: Check market hours and conditions
+        spread_bps = market_features.get('spread', 0.001) * 10000  # Convert to basis points
+        if spread_bps > 100:  # Spread too wide
+            logger.warning(f"Wide spread detected for {symbol}: {spread_bps:.1f}bps. Using conservative execution.")
+            return self._get_conservative_execution(size_delta, market_features, atr)
+        
+        # Guard: Capacity constraints require more careful execution
+        if capacity_flag:
+            logger.info(f"Capacity-constrained execution for {symbol}")
+            return self._get_capacity_aware_execution(size_delta, market_features, atr)
+        
+        try:
+            # Attempt RL policy prediction with bounds checking
+            if self.policy is not None:
+                decision = self._get_rl_decision(
+                    size_delta, market_features, atr, regime, current_position
+                )
+                
+                # Bounds checking on RL output
+                decision = self._apply_execution_bounds(decision, market_features, atr)
+                
+                # Add confidence and metadata
+                decision['confidence'] = min(0.9, market_features.get('signal_confidence', 0.5))
+                decision['reason'] = 'rl_policy'
+                decision['regime'] = regime
+                
+                return decision
+            else:
+                # Fallback to maker ladder with jitter
+                return self._get_fallback_maker_ladder_decision(
+                    size_delta, market_features, atr, regime
+                )
+                
+        except Exception as e:
+            logger.error(f"Execution decision error for {symbol}: {e}")
+            return self._get_emergency_fallback(size_delta, market_features)
             atr: Average True Range for sizing
             
         Returns:
@@ -567,6 +626,88 @@ class ExecutionRL:
         }
         
         return stats
+    
+    def _get_conservative_execution(self, 
+                                   size_delta: float,
+                                   market_features: Dict[str, float],
+                                   atr: float) -> Dict[str, Any]:
+        """Conservative execution for adverse market conditions."""
+        # Break large orders into smaller pieces
+        max_chunk_size = market_features.get('adv_pct', 0.01) * 1000  # Based on ADV
+        
+        if abs(size_delta) > max_chunk_size:
+            # Execute only a portion
+            execution_size = np.sign(size_delta) * min(abs(size_delta), max_chunk_size)
+        else:
+            execution_size = size_delta
+        
+        # Use wider spreads for limit orders
+        limit_offset = atr * 0.5 * np.sign(size_delta)  # Wider offset
+        
+        return {
+            'size_delta': execution_size,
+            'order_type': 'limit',
+            'limit_offset': limit_offset,
+            'confidence': 0.6,
+            'reason': 'conservative_wide_spread'
+        }
+    
+    def _get_capacity_aware_execution(self, 
+                                     size_delta: float,
+                                     market_features: Dict[str, float],
+                                     atr: float) -> Dict[str, Any]:
+        """Capacity-aware execution for large positions relative to ADV."""
+        # Use TWAP-style execution with smaller chunks
+        volume_ratio = market_features.get('volume_ratio', 1.0)
+        
+        # Reduce execution size based on volume
+        size_multiplier = min(1.0, volume_ratio * 0.5)  # Max 50% of target if high volume
+        execution_size = size_delta * size_multiplier
+        
+        # Always use limit orders for capacity-constrained trades
+        limit_offset = atr * 0.3 * np.sign(size_delta)
+        
+        return {
+            'size_delta': execution_size,
+            'order_type': 'limit',
+            'limit_offset': limit_offset,
+            'confidence': 0.7,
+            'reason': 'capacity_constrained'
+        }
+    
+    def _apply_execution_bounds(self, 
+                               decision: Dict[str, Any],
+                               market_features: Dict[str, float],
+                               atr: float) -> Dict[str, Any]:
+        """Apply bounds checking to execution decisions."""
+        # Clamp size delta
+        max_size = market_features.get('max_trade_size', 1000.0)
+        decision['size_delta'] = np.clip(decision['size_delta'], -max_size, max_size)
+        
+        # Clamp limit offset
+        max_offset = atr * 0.5  # Max 0.5 ATR offset
+        decision['limit_offset'] = np.clip(decision['limit_offset'], -max_offset, max_offset)
+        
+        # Validate order type
+        if decision['order_type'] not in ['market', 'limit']:
+            decision['order_type'] = 'limit'  # Default to limit
+        
+        return decision
+    
+    def _get_emergency_fallback(self, 
+                               size_delta: float,
+                               market_features: Dict[str, float]) -> Dict[str, Any]:
+        """Emergency fallback for when everything else fails."""
+        # Conservative market order with reduced size
+        safe_size = size_delta * 0.5  # Execute only half the target
+        
+        return {
+            'size_delta': safe_size,
+            'order_type': 'market',
+            'limit_offset': 0.0,
+            'confidence': 0.3,
+            'reason': 'emergency_fallback'
+        }
 
 
 class ExecutionTrainingCallback(BaseCallback):

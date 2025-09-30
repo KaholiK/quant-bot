@@ -11,9 +11,14 @@ trading:
     max_leverage: 2.0
     single_name_max_pct: 0.10
     sector_max_pct: 0.30
-    asset_class_caps: { crypto_max_gross_pct: 0.50 }
-    kill_switch_dd: 0.20
+    crypto_max_gross_pct: 0.50
     vol_target_ann: 0.12
+    kill_switch_dd: 0.20
+    day_stop_dd: 0.06
+    week_stop_dd: 0.10
+    blackout:
+      earnings: true
+      fomc: true
   features:
     returns_periods: [1, 5, 20, 60]
     sma_periods: [20, 50, 200]
@@ -26,6 +31,11 @@ trading:
     horizon_bars: 5
     tp_atr_mult: 1.75
     sl_atr_mult: 1.00
+  regime:
+    enabled: true
+    smooth_bars: 5
+  capacity:
+    adv_cap_pct: 0.05
   models:
     classifier_path: models/xgb_classifier.joblib
     meta_model_path: models/meta_filter.joblib
@@ -40,8 +50,9 @@ trading:
     cv: {scheme: purged_kfold_embargo, folds: 5, embargo_frac: 0.02}
     retrain_cadence: weekly
     gates: {oos_sortino_min: 1.2, oos_profit_factor_min: 1.15, oos_max_dd_max: 0.06}
-    meta_threshold: 0.55
+    meta_threshold: 0.58
   execution:
     maker_ladder_offsets_atr: [0.10, 0.20, 0.30]
     min_ms_between_orders: 300
     min_hold_secs: 60
+    use_vector_env: true

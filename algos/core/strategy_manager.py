@@ -5,21 +5,24 @@ Coordinates multiple strategies, resolves conflicts, and applies meta-filtering.
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Literal
 from loguru import logger
 import joblib
 import os
 from datetime import datetime, timedelta
 
+# Import regime engine
+from .regime import RegimeEngine, RegimeType
+
 
 class StrategyManager:
     """
-    Lightweight strategy manager for signal aggregation and meta-filtering.
+    Enhanced strategy manager for signal aggregation and meta-filtering.
     
     Responsibilities:
     - Aggregate signals from multiple strategies
-    - Resolve conflicts using priority/confidence
-    - Apply meta-labeling filter to reject low-quality trades
+    - Apply regime-conditional strategy priorities
+    - Apply meta-labeling filter to reject low-quality trades  
     - Allocate capital by strategy performance
     """
     
@@ -28,8 +31,8 @@ class StrategyManager:
         self.config = config
         self.trading_config = config if 'trading' not in config else config['trading']
         
-        # Strategy priorities (higher = more priority)
-        self.strategy_priorities = {
+        # Base strategy priorities (higher = more priority)
+        self.base_strategy_priorities = {
             'scalper_sigma': 3,
             'trend_breakout': 4,
             'bull_mode': 2,
@@ -37,15 +40,50 @@ class StrategyManager:
             'gamma_reversal': 5
         }
         
+        # Regime-conditional strategy priorities
+        self.regime_priority_modifiers = {
+            'trend': {
+                'trend_breakout': 1.5,  # Higher priority in trending markets
+                'bull_mode': 1.3,
+                'scalper_sigma': 0.8,   # Lower priority in trending markets
+                'market_neutral': 0.7,
+                'gamma_reversal': 0.6
+            },
+            'chop': {
+                'scalper_sigma': 1.4,   # Higher priority in choppy markets
+                'gamma_reversal': 1.3,
+                'market_neutral': 1.2,
+                'trend_breakout': 0.7,  # Lower priority in choppy markets
+                'bull_mode': 0.8
+            },
+            'high-vol': {
+                'market_neutral': 1.4,  # Higher priority in high vol
+                'gamma_reversal': 0.6,  # Lower priority in high vol
+                'trend_breakout': 0.8,
+                'scalper_sigma': 0.9,
+                'bull_mode': 0.7
+            },
+            'low-vol': {
+                'bull_mode': 1.3,       # Higher priority in low vol
+                'trend_breakout': 1.2,
+                'scalper_sigma': 1.1,
+                'gamma_reversal': 1.4,  # Higher priority in low vol
+                'market_neutral': 0.9
+            }
+        }
+        
         # Strategy performance tracking
         self.strategy_performance = {
             name: {'trades': 0, 'wins': 0, 'total_pnl': 0.0, 'weight': 1.0}
-            for name in self.strategy_priorities.keys()
+            for name in self.base_strategy_priorities.keys()
         }
         
         # Meta-filter model
         self.meta_model = None
-        self.meta_threshold = self.trading_config.get('learning', {}).get('meta_threshold', 0.55)
+        self.meta_threshold = self.trading_config.get('learning', {}).get('meta_threshold', 0.58)
+        
+        # Initialize regime engine
+        self.regime_engine = RegimeEngine(self.trading_config)
         
         # Load meta-filter if available
         self._load_meta_model()
@@ -69,23 +107,28 @@ class StrategyManager:
     
     
     def aggregate_signals(self, signals_by_strategy: Dict[str, Dict[str, Any]], 
-                         meta_features: Dict[str, Any]) -> Dict[str, Any]:
+                         meta_features: Dict[str, Any],
+                         market_data: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
         """
-        Aggregate signals from multiple strategies with meta-model veto.
-        
-        Flattens per-symbol suggestions across strategies, applies priority/confidence 
-        conflict resolution, and applies meta-model veto if models/meta_filter.joblib 
-        exists and its prob < threshold.
+        Aggregate signals from multiple strategies with regime-conditional priorities and meta-model veto.
         
         Args:
             signals_by_strategy: Dict of {strategy_name: {symbol: signal_info}}
             meta_features: Meta-features for meta-model evaluation
+            market_data: Market data for regime detection
             
         Returns:
-            Dict of {symbol: target_weight/confidence}
+            Dict of {symbol: target_weight/confidence/regime}
         """
         if not signals_by_strategy:
             return {}
+        
+        # Get current market regime
+        current_regime, regime_confidence = self._get_current_regime(market_data)
+        logger.debug(f"Current market regime: {current_regime} (confidence: {regime_confidence:.2f})")
+        
+        # Get regime-adjusted strategy priorities
+        regime_priorities = self._get_regime_adjusted_priorities(current_regime)
         
         # Flatten signals by symbol across strategies
         symbol_signals = {}
@@ -98,7 +141,9 @@ class StrategyManager:
                     symbol_signals[symbol] = []
                 
                 signal_info['strategy'] = strategy_name
-                signal_info['priority'] = self.strategy_priorities.get(strategy_name, 1)
+                signal_info['priority'] = regime_priorities.get(strategy_name, 1.0)
+                signal_info['regime'] = current_regime
+                signal_info['regime_confidence'] = regime_confidence
                 symbol_signals[symbol].append(signal_info)
         
         # Process each symbol
@@ -107,100 +152,222 @@ class StrategyManager:
             if not signals:
                 continue
                 
-            # Sort by priority and confidence
+            # Sort by regime-adjusted priority and confidence
             signals.sort(key=lambda x: (x['priority'], x.get('confidence', 0.0)), reverse=True)
             primary_signal = signals[0]
             
             # Apply meta-filter veto
-            meta_decision = self._apply_meta_filter_veto(symbol, primary_signal, meta_features)
+            meta_decision = self._apply_meta_filter_veto(symbol, primary_signal, meta_features, current_regime)
             
             if meta_decision['accept']:
                 final_signals[symbol] = {
                     'target_weight': primary_signal.get('target_weight', 0.0),
                     'confidence': primary_signal.get('confidence', 0.0) * meta_decision['confidence'],
                     'strategy': primary_signal['strategy'],
-                    'meta_prob': meta_decision.get('meta_prob', 1.0)
+                    'regime': current_regime,
+                    'regime_confidence': regime_confidence,
+                    'meta_prob': meta_decision.get('meta_prob', 1.0),
+                    'primary_prob': meta_decision.get('primary_prob', 0.5)
                 }
+                
+                # Log decision details
+                logger.debug(f"Signal accepted for {symbol}: strategy={primary_signal['strategy']}, "
+                           f"regime={current_regime}, primary_prob={meta_decision.get('primary_prob', 0.5):.3f}, "
+                           f"meta_prob={meta_decision.get('meta_prob', 1.0):.3f}")
             else:
                 logger.debug(f"Meta-filter rejected signal for {symbol}: {meta_decision['reason']}")
         
         return final_signals
     
-    def _apply_meta_filter_veto(self, symbol: str, primary_signal: Dict[str, Any], 
-                               meta_features: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply meta-filter veto logic."""
-        if self.meta_model is None:
-            return {'accept': True, 'confidence': 1.0, 'reason': 'no_meta_model'}
+    def _get_current_regime(self, market_data: Optional[pd.DataFrame]) -> Tuple[RegimeType, float]:
+        """Get current market regime using regime engine."""
+        if market_data is None or market_data.empty:
+            return 'trend', 0.5  # Default fallback
         
         try:
-            # Build meta-features for this symbol/signal
-            features = self._build_meta_features_from_dict(symbol, primary_signal, meta_features)
+            return self.regime_engine.get_regime(market_data)
+        except Exception as e:
+            logger.error(f"Error getting regime: {e}")
+            return 'trend', 0.5
+    
+    def _get_regime_adjusted_priorities(self, regime: RegimeType) -> Dict[str, float]:
+        """Get strategy priorities adjusted for current regime."""
+        regime_priorities = {}
+        
+        # Get base priorities and apply regime modifiers
+        for strategy, base_priority in self.base_strategy_priorities.items():
+            modifier = self.regime_priority_modifiers.get(regime, {}).get(strategy, 1.0)
+            regime_priorities[strategy] = base_priority * modifier
+        
+        return regime_priorities
+    
+    def _apply_meta_filter_veto(self, symbol: str, primary_signal: Dict[str, Any], 
+                               meta_features: Dict[str, Any], regime: RegimeType) -> Dict[str, Any]:
+        """Apply enhanced meta-filter veto logic with regime conditioning."""
+        if self.meta_model is None:
+            return {
+                'accept': True, 
+                'confidence': 1.0, 
+                'reason': 'No meta-model available',
+                'meta_prob': 1.0,
+                'primary_prob': 0.5
+            }
+        
+        try:
+            # Build meta-features including regime
+            meta_feature_vector = self._build_meta_features_from_dict(
+                symbol, primary_signal, meta_features, regime
+            )
             
-            # Get prediction from meta-model
-            if hasattr(self.meta_model, 'predict_proba'):
-                proba = self.meta_model.predict_proba([features])[0]
-                meta_prob = proba[1] if len(proba) > 1 else proba[0]  # Probability of positive class
-            else:
-                # Regression model
-                meta_prob = self.meta_model.predict([features])[0]
-                meta_prob = max(0.0, min(1.0, meta_prob))  # Clamp to [0,1]
+            if not meta_feature_vector or len(meta_feature_vector) == 0:
+                return {
+                    'accept': True, 
+                    'confidence': 0.8, 
+                    'reason': 'Insufficient meta-features',
+                    'meta_prob': 0.8,
+                    'primary_prob': 0.5
+                }
             
-            accept = meta_prob >= self.meta_threshold
+            # Get meta-model prediction
+            meta_prob = self.meta_model.predict_proba([meta_feature_vector])[0][1]  # Probability of class 1 (good trade)
+            primary_prob = primary_signal.get('confidence', 0.5)
+            
+            # Apply threshold with regime-specific adjustments
+            regime_threshold_adjustment = {
+                'trend': -0.05,      # Lower threshold in trending markets
+                'chop': 0.05,        # Higher threshold in choppy markets  
+                'high-vol': 0.10,    # Much higher threshold in high vol
+                'low-vol': -0.03     # Slightly lower threshold in low vol
+            }
+            
+            adjusted_threshold = self.meta_threshold + regime_threshold_adjustment.get(regime, 0.0)
+            
+            accept = meta_prob >= adjusted_threshold
+            confidence = meta_prob if accept else 0.0
+            
+            reason = f"Meta-prob {meta_prob:.3f} vs threshold {adjusted_threshold:.3f} (regime: {regime})"
             
             return {
                 'accept': accept,
-                'confidence': meta_prob if accept else 0.0,
-                'meta_prob': meta_prob,
-                'reason': f"meta_prob_{meta_prob:.3f}_vs_threshold_{self.meta_threshold}"
+                'confidence': confidence,
+                'reason': reason,
+                'meta_prob': float(meta_prob),
+                'primary_prob': float(primary_prob),
+                'threshold_used': adjusted_threshold
             }
             
         except Exception as e:
-            logger.warning(f"Meta-filter error for {symbol}: {e}")
-            return {'accept': True, 'confidence': 1.0, 'reason': 'meta_filter_error'}
+            logger.error(f"Error in meta-filter veto: {e}")
+            return {
+                'accept': True, 
+                'confidence': 0.5, 
+                'reason': f'Meta-filter error: {e}',
+                'meta_prob': 0.5,
+                'primary_prob': 0.5
+            }
     
     def _build_meta_features_from_dict(self, symbol: str, primary_signal: Dict[str, Any], 
-                                      meta_features: Dict[str, Any]) -> List[float]:
-        """Build feature vector for meta-filter from dictionary inputs."""
-        features = []
-        
-        # Primary signal features
-        features.append(primary_signal.get('confidence', 0.0))
-        features.append(abs(primary_signal.get('signal', 0)))  # Signal strength
-        
-        # Market features from meta_features dict
-        features.append(meta_features.get('volatility', 0.2))
-        features.append(meta_features.get('volume_ratio', 1.0))
-        features.append(meta_features.get('spread', 0.01))
-        features.append(meta_features.get('atr_ratio', 1.0))
-        
-        # Time features
-        now = datetime.now()
-        features.append(now.hour / 24.0)  # Hour of day
-        features.append(now.weekday() / 6.0)  # Day of week
-        
-        # Symbol-specific features (if available)
-        features.append(meta_features.get(f'{symbol}_momentum', 0.0))
-        features.append(meta_features.get(f'{symbol}_volatility', 0.2))
-        
-        return features
-
-    def aggregate_signals_legacy(self, 
-                         symbol: str,
-                         strategy_signals: Dict[str, Dict[str, Any]],
-                         market_features: Dict[str, float],
-                         price_data: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Aggregate signals from multiple strategies.
-        
-        Args:
-            symbol: Trading symbol
-            strategy_signals: Dict of {strategy_name: signal_dict}
-            market_features: Current market features
-            price_data: Recent price data
+                                      meta_features: Dict[str, Any], regime: RegimeType) -> List[float]:
+        """Build meta-feature vector including regime information."""
+        try:
+            feature_vector = []
             
-        Returns:
-            Aggregated signal with meta-filter decision
-        """
+            # Primary signal features
+            feature_vector.extend([
+                primary_signal.get('confidence', 0.5),
+                primary_signal.get('target_weight', 0.0),
+                len(primary_signal.get('strategy', '')),  # Strategy complexity proxy
+                primary_signal.get('priority', 1.0),
+            ])
+            
+            # Meta-features from feature pipeline
+            meta_keys = [
+                'volatility', 'volume_ratio', 'rsi', 'bb_position', 'atr_ratio',
+                'relative_strength_index', 'momentum_rank_1m', 'momentum_rank_3m',
+                'sector_zscore', 'beta_to_index', 'earnings_proximity', 'fomc_day'
+            ]
+            
+            for key in meta_keys:
+                value = meta_features.get(key, 0.0)
+                # Handle NaN values
+                if pd.isna(value):
+                    value = 0.0
+                feature_vector.append(float(value))
+            
+            # Regime features (one-hot encoded)
+            regime_features = [
+                1.0 if regime == 'trend' else 0.0,
+                1.0 if regime == 'chop' else 0.0,
+                1.0 if regime == 'high-vol' else 0.0,
+                1.0 if regime == 'low-vol' else 0.0,
+            ]
+            feature_vector.extend(regime_features)
+            
+            # Strategy-specific features (one-hot encoded)
+            strategy_name = primary_signal.get('strategy', '')
+            strategy_features = [
+                1.0 if strategy_name == 'scalper_sigma' else 0.0,
+                1.0 if strategy_name == 'trend_breakout' else 0.0,
+                1.0 if strategy_name == 'bull_mode' else 0.0,
+                1.0 if strategy_name == 'market_neutral' else 0.0,
+                1.0 if strategy_name == 'gamma_reversal' else 0.0,
+            ]
+            feature_vector.extend(strategy_features)
+            
+            # Time-based features (hour of day, day of week)
+            now = datetime.now()
+            time_features = [
+                now.hour / 24.0,  # Normalized hour
+                now.weekday() / 7.0,  # Normalized day of week
+            ]
+            feature_vector.extend(time_features)
+            
+            return feature_vector
+            
+        except Exception as e:
+            logger.error(f"Error building meta-features: {e}")
+            return []
+    
+    def _is_strategy_enabled(self, strategy_name: str) -> bool:
+        """Check if a strategy is enabled in configuration."""
+        strategies_config = self.trading_config.get('strategies', {})
+        strategy_config = strategies_config.get(strategy_name, {})
+        return strategy_config.get('enabled', True)
+    
+    def update_strategy_performance(self, strategy_name: str, pnl: float, success: bool) -> None:
+        """Update strategy performance tracking."""
+        if strategy_name in self.strategy_performance:
+            perf = self.strategy_performance[strategy_name]
+            perf['trades'] += 1
+            perf['total_pnl'] += pnl
+            if success:
+                perf['wins'] += 1
+            
+            # Update weight based on performance
+            win_rate = perf['wins'] / perf['trades']
+            avg_pnl = perf['total_pnl'] / perf['trades']
+            perf['weight'] = max(0.1, min(2.0, win_rate * avg_pnl))
+            
+            logger.debug(f"Updated {strategy_name} performance: "
+                        f"trades={perf['trades']}, wins={perf['wins']}, "
+                        f"total_pnl={perf['total_pnl']:.2f}, weight={perf['weight']:.2f}")
+    
+    def get_strategy_stats(self) -> Dict[str, Dict[str, float]]:
+        """Get strategy performance statistics."""
+        return self.strategy_performance.copy()
+    
+    def get_regime_info(self) -> Dict[str, Any]:
+        """Get current regime information."""
+        try:
+            # This would need market data - return cached info if available
+            return {
+                'current_regime': getattr(self, '_last_regime', 'trend'),
+                'confidence': getattr(self, '_last_regime_confidence', 0.5),
+                'regime_enabled': self.regime_engine.enabled
+            }
+        except Exception as e:
+            logger.error(f"Error getting regime info: {e}")
+            return {'current_regime': 'trend', 'confidence': 0.5, 'regime_enabled': False}
         if not strategy_signals:
             return {'signal': 0, 'confidence': 0.0, 'reason': 'no_signals'}
         

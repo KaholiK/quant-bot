@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Offline classifier training script for quant-bot.
+Enhanced classifier training script with parallelization and Optuna optimization.
 Fetches historical data, builds features, generates labels, and trains XGBoost with purged CV.
 """
 
@@ -9,9 +9,12 @@ import logging
 import sys
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import time
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import warnings
 
 # Add algos to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -23,10 +26,20 @@ try:
     import requests
     from sklearn.model_selection import cross_val_score
     from sklearn.calibration import CalibratedClassifierCV
-    from sklearn.metrics import classification_report, accuracy_score
+    from sklearn.metrics import classification_report, accuracy_score, log_loss, brier_score_loss
     import xgboost as xgb
     import joblib
+    import matplotlib.pyplot as plt
+    import seaborn as sns
     
+    # Optional dependencies
+    try:
+        import optuna
+        from optuna.samplers import TPESampler
+        OPTUNA_AVAILABLE = True
+    except ImportError:
+        OPTUNA_AVAILABLE = False
+        
     from algos.core.feature_pipe import FeaturePipeline
     from algos.core.labels import TripleBarrierLabeler
     from algos.core.cv_utils import PurgedKFold
@@ -43,6 +56,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
 
 
 class DataFetcher:
@@ -187,17 +204,30 @@ class ClassifierTrainer:
     def __init__(self, config_path: str = "config.yaml"):
         """Initialize trainer with configuration."""
         self.config = load_config(config_path)
-        self.feature_pipeline = FeaturePipeline(get_legacy_dict(self.config))
-        self.labeler = TripleBarrierLabeler(get_legacy_dict(self.config))
+        self.legacy_config = get_legacy_dict(self.config)
+        self.feature_pipeline = FeaturePipeline(self.legacy_config)
+        self.labeler = TripleBarrierLabeler(self.legacy_config)
+        
+        # Create output directories
+        self.cache_dir = Path("data/cache")
+        self.models_dir = Path("models")
+        self.reports_dir = Path("reports")
+        
+        for dir_path in [self.cache_dir, self.models_dir, self.reports_dir]:
+            dir_path.mkdir(parents=True, exist_ok=True)
         
         # Log label settings
         logger.info(f"Label settings: horizon_bars={self.labeler.horizon_bars}, "
                    f"tp_atr_mult={self.labeler.profit_take_mult}, "
                    f"sl_atr_mult={self.labeler.stop_loss_mult}")
         
-    def prepare_training_data(self, price_data: Dict[str, pd.DataFrame]) -> tuple:
+        # Parallelization settings
+        self.n_jobs = min(mp.cpu_count(), 8)  # Limit to 8 cores max
+        logger.info(f"Using {self.n_jobs} CPU cores for parallelization")
+    
+    def prepare_training_data_parallel(self, price_data: Dict[str, pd.DataFrame]) -> Tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
         """
-        Prepare features and labels for training.
+        Prepare features and labels for training using parallel processing.
         
         Args:
             price_data: Dictionary of price DataFrames by symbol
@@ -205,21 +235,82 @@ class ClassifierTrainer:
         Returns:
             Tuple of (features_df, labels_df, sample_weights)
         """
-        logger.info("Preparing training data...")
+        logger.info(f"Preparing training data for {len(price_data)} symbols using {self.n_jobs} processes...")
         
-        all_features = []
-        all_labels = []
-        all_weights = []
+        # Check cache first
+        cache_file = self.cache_dir / f"training_data_{datetime.now().strftime('%Y%m%d')}.parquet"
+        if cache_file.exists():
+            logger.info("Loading cached training data...")
+            try:
+                cached_data = pd.read_parquet(cache_file)
+                features_df = cached_data.drop(['label', 'sample_weight'], axis=1)
+                labels_df = cached_data[['label']].copy()
+                sample_weights = cached_data['sample_weight'].values
+                logger.info(f"Loaded cached data: {len(features_df)} samples")
+                return features_df, labels_df, sample_weights
+            except Exception as e:
+                logger.warning(f"Failed to load cache: {e}")
         
-        for symbol, df in price_data.items():
+        # Process symbols in parallel
+        symbol_chunks = list(price_data.items())
+        chunk_size = max(1, len(symbol_chunks) // self.n_jobs)
+        
+        with ProcessPoolExecutor(max_workers=self.n_jobs) as executor:
+            # Submit parallel processing tasks
+            futures = []
+            for i in range(0, len(symbol_chunks), chunk_size):
+                chunk = symbol_chunks[i:i+chunk_size]
+                future = executor.submit(self._process_symbol_chunk, chunk)
+                futures.append(future)
+            
+            # Collect results
+            all_features = []
+            all_labels = []
+            all_weights = []
+            
+            for future in as_completed(futures):
+                try:
+                    chunk_features, chunk_labels, chunk_weights = future.result()
+                    all_features.extend(chunk_features)
+                    all_labels.extend(chunk_labels)
+                    all_weights.extend(chunk_weights)
+                except Exception as e:
+                    logger.error(f"Chunk processing failed: {e}")
+        
+        if not all_features:
+            raise ValueError("No valid training data generated")
+        
+        # Combine all data
+        features_df = pd.concat(all_features, ignore_index=True)
+        labels_df = pd.concat(all_labels, ignore_index=True)
+        sample_weights = np.array(all_weights)
+        
+        # Cache the results
+        try:
+            cache_data = features_df.copy()
+            cache_data['label'] = labels_df['label']
+            cache_data['sample_weight'] = sample_weights
+            cache_data.to_parquet(cache_file, compression='snappy')
+            logger.info(f"Training data cached to {cache_file}")
+        except Exception as e:
+            logger.warning(f"Failed to cache data: {e}")
+        
+        logger.info(f"Training data prepared: {len(features_df)} samples, {len(features_df.columns)} features")
+        return features_df, labels_df, sample_weights
+    
+    def _process_symbol_chunk(self, symbol_chunk: List[Tuple[str, pd.DataFrame]]) -> Tuple[List[pd.DataFrame], List[pd.DataFrame], List[float]]:
+        """Process a chunk of symbols for feature generation."""
+        chunk_features = []
+        chunk_labels = []
+        chunk_weights = []
+        
+        for symbol, df in symbol_chunk:
             if len(df) < 100:  # Skip symbols with insufficient data
                 continue
                 
             try:
-                logger.info(f"Processing {symbol}...")
-                
                 # Generate features
-                features = self.feature_pipeline.transform(df)
+                features = self.feature_pipeline.build_features(df, symbol=symbol)
                 
                 # Generate labels
                 labels_result = self.labeler.create_labels(df)
@@ -230,6 +321,130 @@ class ClassifierTrainer:
                     min_len = min(len(features), len(labels))
                     features = features.iloc[-min_len:]
                     labels = labels.iloc[-min_len:]
+                
+                # Add symbol column
+                features['symbol'] = symbol
+                labels['symbol'] = symbol
+                
+                # Sample weights (higher weight for cleaner signals)
+                weights = np.ones(len(labels))
+                if 'confidence' in labels_result:
+                    weights = labels_result['confidence'].values
+                
+                chunk_features.append(features)
+                chunk_labels.append(labels)
+                chunk_weights.extend(weights)
+                
+                logger.debug(f"Processed {symbol}: {len(features)} samples")
+                
+            except Exception as e:
+                logger.error(f"Failed to process {symbol}: {e}")
+                continue
+        
+        return chunk_features, chunk_labels, chunk_weights
+    
+    def optimize_hyperparameters(self, 
+                                X: pd.DataFrame, 
+                                y: pd.Series, 
+                                sample_weights: np.ndarray,
+                                n_trials: int = 50) -> Dict[str, Any]:
+        """
+        Optimize hyperparameters using Optuna.
+        
+        Args:
+            X: Features
+            y: Labels  
+            sample_weights: Sample weights
+            n_trials: Number of optimization trials
+            
+        Returns:
+            Best hyperparameters
+        """
+        if not OPTUNA_AVAILABLE:
+            logger.warning("Optuna not available, using default hyperparameters")
+            return self._get_default_params()
+        
+        logger.info(f"Optimizing hyperparameters with {n_trials} trials...")
+        
+        def objective(trial):
+            """Optuna objective function."""
+            params = {
+                'objective': 'multi:softprob',
+                'num_class': 3,
+                'max_depth': trial.suggest_int('max_depth', 3, 10),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                'n_estimators': trial.suggest_int('n_estimators', 50, 300),
+                'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
+                'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
+                'random_state': 42,
+                'n_jobs': 1  # Use single job within each trial
+            }
+            
+            # Create and train model
+            model = xgb.XGBClassifier(**params)
+            
+            # Purged cross-validation
+            try:
+                cv = PurgedKFold(n_splits=5, embargo_frac=0.02)
+                cv_scores = cross_val_score(
+                    model, X, y,
+                    cv=cv,
+                    scoring='accuracy',
+                    fit_params={'sample_weight': sample_weights},
+                    n_jobs=1
+                )
+                return cv_scores.mean()
+            except Exception:
+                # Fallback to standard CV
+                cv_scores = cross_val_score(
+                    model, X, y, 
+                    cv=5, 
+                    scoring='accuracy',
+                    fit_params={'sample_weight': sample_weights},
+                    n_jobs=1
+                )
+                return cv_scores.mean()
+        
+        # Create study and optimize
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=TPESampler(seed=42)
+        )
+        
+        study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+        
+        logger.info(f"Best trial: {study.best_trial.number}")
+        logger.info(f"Best accuracy: {study.best_value:.4f}")
+        logger.info(f"Best params: {study.best_params}")
+        
+        # Add fixed parameters
+        best_params = study.best_params.copy()
+        best_params.update({
+            'objective': 'multi:softprob',
+            'num_class': 3,
+            'random_state': 42,
+            'n_jobs': -1
+        })
+        
+        return best_params
+    
+    def _get_default_params(self) -> Dict[str, Any]:
+        """Get default XGBoost parameters."""
+        return {
+            'objective': 'multi:softprob',
+            'num_class': 3,
+            'max_depth': 6,
+            'learning_rate': 0.1,
+            'n_estimators': 150,
+            'subsample': 0.8,
+            'colsample_bytree': 0.8,
+            'reg_alpha': 0.1,
+            'reg_lambda': 1.0,
+            'random_state': 42,
+            'n_jobs': -1
+        }
                 
                 # Add symbol column
                 features['symbol'] = symbol
@@ -262,14 +477,16 @@ class ClassifierTrainer:
     def train_classifier(self, 
                         features_df: pd.DataFrame,
                         labels_df: pd.DataFrame, 
-                        sample_weights: np.ndarray) -> Dict[str, Any]:
+                        sample_weights: np.ndarray,
+                        optimize_params: bool = True) -> Dict[str, Any]:
         """
-        Train XGBoost classifier with purged cross-validation.
+        Train XGBoost classifier with optional hyperparameter optimization.
         
         Args:
             features_df: Features DataFrame
             labels_df: Labels DataFrame
             sample_weights: Sample weights
+            optimize_params: Whether to optimize hyperparameters
             
         Returns:
             Dictionary with trained models and metrics
@@ -287,50 +504,160 @@ class ClassifierTrainer:
         y = y[valid_mask]
         sample_weights = sample_weights[valid_mask]
         
+        # Convert labels to 0, 1, 2 for XGBoost
+        y_mapped = y.map({-1: 0, 0: 1, 1: 2})
+        
         logger.info(f"Training on {len(X)} samples with {len(feature_cols)} features")
         logger.info(f"Label distribution: {y.value_counts().to_dict()}")
         
-        # XGBoost parameters
-        xgb_params = {
-            'objective': 'multi:softprob',
-            'num_class': 3,
-            'max_depth': 6,
-            'learning_rate': 0.1,
-            'n_estimators': 100,
-            'subsample': 0.8,
-            'colsample_bytree': 0.8,
-            'random_state': 42,
-            'n_jobs': -1
-        }
+        # Optimize hyperparameters if requested
+        if optimize_params:
+            best_params = self.optimize_hyperparameters(X, y_mapped, sample_weights)
+        else:
+            best_params = self._get_default_params()
         
-        # Initialize model
-        model = xgb.XGBClassifier(**xgb_params)
+        # Initialize model with best parameters
+        model = xgb.XGBClassifier(**best_params)
         
-        # Purged cross-validation
+        # Purged cross-validation evaluation
+        logger.info("Performing purged cross-validation...")
         try:
             cv = PurgedKFold(n_splits=5, embargo_frac=0.02)
             cv_scores = cross_val_score(
-                model, X, y, 
+                model, X, y_mapped, 
                 cv=cv,
+                scoring='accuracy',
+                fit_params={'sample_weight': sample_weights},
+                n_jobs=1  # Avoid nested parallelization
+            )
+            cv_accuracy = cv_scores.mean()
+            cv_std = cv_scores.std()
+            logger.info(f"Purged CV Accuracy: {cv_accuracy:.4f} ± {cv_std:.4f}")
+        except Exception as e:
+            logger.warning(f"Purged CV failed, using standard CV: {e}")
+            cv_scores = cross_val_score(
+                model, X, y_mapped, 
+                cv=5, 
                 scoring='accuracy',
                 fit_params={'sample_weight': sample_weights}
             )
-            logger.info(f"CV Accuracy: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
-        except Exception as e:
-            logger.warning(f"Purged CV failed, using standard CV: {e}")
-            cv_scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
-            logger.info(f"Standard CV Accuracy: {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+            cv_accuracy = cv_scores.mean()
+            cv_std = cv_scores.std()
+            logger.info(f"Standard CV Accuracy: {cv_accuracy:.4f} ± {cv_std:.4f}")
         
         # Train final model
-        model.fit(X, y, sample_weight=sample_weights)
+        logger.info("Training final model...")
+        model.fit(X, y_mapped, sample_weight=sample_weights)
         
         # Calibrate probabilities
         logger.info("Calibrating probabilities...")
         calibrated_model = CalibratedClassifierCV(model, method='isotonic', cv=3)
-        calibrated_model.fit(X, y, sample_weight=sample_weights)
+        calibrated_model.fit(X, y_mapped, sample_weight=sample_weights)
         
-        # Evaluate
+        # Evaluate on training set
         y_pred = calibrated_model.predict(X)
+        y_proba = calibrated_model.predict_proba(X)
+        
+        train_accuracy = accuracy_score(y_mapped, y_pred)
+        
+        # Calculate additional metrics
+        try:
+            brier_score = brier_score_loss(y_mapped == 2, y_proba[:, 2])  # Probability of class 2 (buy)
+            log_loss_score = log_loss(y_mapped, y_proba)
+        except Exception as e:
+            logger.warning(f"Error calculating additional metrics: {e}")
+            brier_score = np.nan
+            log_loss_score = np.nan
+        
+        logger.info(f"Training Accuracy: {train_accuracy:.4f}")
+        logger.info(f"Brier Score: {brier_score:.4f}")
+        logger.info(f"Log Loss: {log_loss_score:.4f}")
+        
+        # Feature importance
+        feature_importance = pd.DataFrame({
+            'feature': feature_cols,
+            'importance': model.feature_importances_
+        }).sort_values('importance', ascending=False)
+        
+        # Save models and generate reports
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Save main classifier
+        model_path = self.models_dir / 'xgb_classifier.joblib'
+        joblib.dump(calibrated_model, model_path)
+        logger.info(f"Model saved to {model_path}")
+        
+        # Save feature importance
+        importance_path = self.reports_dir / f'feature_importance_{timestamp}.csv'
+        feature_importance.to_csv(importance_path, index=False)
+        
+        # Generate calibration plots
+        self._generate_calibration_plots(y_mapped, y_proba, timestamp)
+        
+        # Generate feature importance plot
+        self._generate_feature_importance_plot(feature_importance.head(20), timestamp)
+        
+        return {
+            'model': calibrated_model,
+            'feature_importance': feature_importance,
+            'cv_accuracy': cv_accuracy,
+            'cv_std': cv_std,
+            'train_accuracy': train_accuracy,
+            'brier_score': brier_score,
+            'log_loss': log_loss_score,
+            'best_params': best_params,
+            'n_samples': len(X),
+            'n_features': len(feature_cols)
+        }
+    
+    def _generate_calibration_plots(self, y_true: np.ndarray, y_proba: np.ndarray, timestamp: str) -> None:
+        """Generate calibration plots."""
+        try:
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+            for i, class_name in enumerate(['Sell', 'Hold', 'Buy']):
+                ax = axes[i]
+                
+                # Calibration plot for each class
+                from sklearn.calibration import calibration_curve
+                
+                fraction_of_positives, mean_predicted_value = calibration_curve(
+                    y_true == i, y_proba[:, i], n_bins=10, normalize=True
+                )
+                
+                ax.plot(mean_predicted_value, fraction_of_positives, "s-", label=f"{class_name} (Class {i})")
+                ax.plot([0, 1], [0, 1], "k:", label="Perfectly calibrated")
+                ax.set_xlabel("Mean Predicted Probability")
+                ax.set_ylabel("Fraction of Positives")
+                ax.set_title(f"Calibration Plot - {class_name}")
+                ax.legend()
+                ax.grid(True)
+            
+            plt.tight_layout()
+            plot_path = self.reports_dir / f'calibration_plot_{timestamp}.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            logger.info(f"Calibration plots saved to {plot_path}")
+        except Exception as e:
+            logger.error(f"Failed to generate calibration plots: {e}")
+    
+    def _generate_feature_importance_plot(self, feature_importance: pd.DataFrame, timestamp: str) -> None:
+        """Generate feature importance plot."""
+        try:
+            plt.figure(figsize=(10, 8))
+            sns.barplot(data=feature_importance, y='feature', x='importance')
+            plt.title('Top 20 Feature Importances')
+            plt.xlabel('Importance')
+            plt.tight_layout()
+            
+            plot_path = self.reports_dir / f'feature_importance_{timestamp}.png'
+            plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            logger.info(f"Feature importance plot saved to {plot_path}")
+        except Exception as e:
+            logger.error(f"Failed to generate feature importance plot: {e}")
         accuracy = accuracy_score(y, y_pred)
         
         logger.info(f"Final accuracy: {accuracy:.4f}")

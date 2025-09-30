@@ -13,12 +13,13 @@ import scipy.optimize as sco
 
 
 class Portfolio:
-    """Portfolio management system with risk parity and optimization capabilities."""
+    """Enhanced portfolio management system with capacity constraints and ES throttle."""
     
     def __init__(self, 
                  initial_capital: float = 100000.0,
                  rebalance_frequency: str = 'monthly',
-                 max_weight: float = 0.1):
+                 max_weight: float = 0.1,
+                 config: Optional[Dict[str, Any]] = None):
         """
         Initialize portfolio manager.
         
@@ -26,11 +27,25 @@ class Portfolio:
             initial_capital: Starting capital
             rebalance_frequency: How often to rebalance ('daily', 'weekly', 'monthly')
             max_weight: Maximum weight per asset
+            config: Trading configuration with capacity and risk settings
         """
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
         self.rebalance_frequency = rebalance_frequency
         self.max_weight = max_weight
+        self.config = config or {}
+        
+        # Capacity management
+        self.capacity_config = self.config.get('capacity', {})
+        self.adv_cap_pct = self.capacity_config.get('adv_cap_pct', 0.05)
+        self.adv_data: Dict[str, float] = {}  # symbol -> average daily volume
+        self.spread_data: Dict[str, float] = {}  # symbol -> average spread
+        
+        # Expected Shortfall throttle
+        self.es_lookback = 30  # days for ES calculation
+        self.es_threshold = -0.05  # 5% ES threshold for throttling
+        self.es_throttle_factor = 0.5  # Reduce gross exposure by this factor when ES triggered
+        self.pnl_history: List[float] = []
         
         # Portfolio state
         self.positions: Dict[str, float] = {}  # symbol -> shares
@@ -42,7 +57,8 @@ class Portfolio:
         self.weight_history: List[Dict[str, float]] = []
         self.rebalance_dates: List[pd.Timestamp] = []
         
-        logger.info(f"Portfolio initialized with ${initial_capital:,.2f}")
+        logger.info(f"Portfolio initialized with ${initial_capital:,.2f}, "
+                   f"ADV cap: {self.adv_cap_pct:.1%}, ES threshold: {self.es_threshold:.1%}")
         
     def update_prices(self, price_data: Dict[str, float]):
         """Update current prices for all assets."""
@@ -82,9 +98,112 @@ class Portfolio:
                 
         return current_weights
     
+    def update_adv_data(self, symbol: str, volume: float, price: float) -> None:
+        """Update average daily volume data for capacity calculations."""
+        if symbol not in self.adv_data:
+            self.adv_data[symbol] = volume
+        else:
+            # Simple exponential moving average
+            alpha = 0.1
+            self.adv_data[symbol] = alpha * volume + (1 - alpha) * self.adv_data[symbol]
+    
+    def update_spread_data(self, symbol: str, spread: float) -> None:
+        """Update average spread data for capacity calculations."""
+        if symbol not in self.spread_data:
+            self.spread_data[symbol] = spread
+        else:
+            # Simple exponential moving average
+            alpha = 0.1
+            self.spread_data[symbol] = alpha * spread + (1 - alpha) * self.spread_data[symbol]
+    
+    def apply_capacity_constraints(self, target_weights: Dict[str, float]) -> Dict[str, float]:
+        """Apply capacity constraints based on ADV and spread costs."""
+        constrained_weights = target_weights.copy()
+        portfolio_value = self._calculate_portfolio_value()
+        
+        for symbol, target_weight in target_weights.items():
+            if symbol == 'CASH':
+                continue
+                
+            # Skip if no ADV data available
+            if symbol not in self.adv_data or symbol not in self.prices:
+                continue
+                
+            target_notional = abs(target_weight) * portfolio_value
+            adv = self.adv_data[symbol]
+            price = self.prices[symbol]
+            
+            # Calculate maximum notional based on ADV capacity
+            max_notional_adv = adv * price * self.adv_cap_pct
+            
+            # Additional constraint based on spread costs
+            spread = self.spread_data.get(symbol, 0.001)  # Default 10bps spread
+            # Reduce capacity further if spreads are wide
+            spread_penalty = max(0.5, 1.0 - spread * 100)  # Reduce if spread > 1%
+            max_notional_final = max_notional_adv * spread_penalty
+            
+            # Apply constraint
+            if target_notional > max_notional_final:
+                reduction_factor = max_notional_final / target_notional
+                constrained_weights[symbol] = target_weight * reduction_factor
+                
+                logger.warning(f"Capacity constraint applied to {symbol}: "
+                             f"target_weight={target_weight:.3f} -> "
+                             f"constrained_weight={constrained_weights[symbol]:.3f} "
+                             f"(ADV=${adv*price:,.0f}, max_notional=${max_notional_final:,.0f})")
+        
+        return constrained_weights
+    
+    def update_pnl_history(self, daily_pnl: float) -> None:
+        """Update daily PnL history for ES calculation."""
+        self.pnl_history.append(daily_pnl)
+        
+        # Keep only recent history
+        if len(self.pnl_history) > self.es_lookback * 2:
+            self.pnl_history = self.pnl_history[-self.es_lookback:]
+    
+    def calculate_expected_shortfall(self, confidence_level: float = 0.05) -> float:
+        """Calculate Expected Shortfall (CVaR) from PnL history."""
+        if len(self.pnl_history) < 10:  # Need sufficient history
+            return 0.0
+        
+        pnl_array = np.array(self.pnl_history[-self.es_lookback:])
+        
+        # Calculate percentile threshold
+        var_threshold = np.percentile(pnl_array, confidence_level * 100)
+        
+        # Calculate ES as mean of losses beyond VaR
+        tail_losses = pnl_array[pnl_array <= var_threshold]
+        
+        if len(tail_losses) == 0:
+            return 0.0
+            
+        es = np.mean(tail_losses)
+        return es
+    
+    def apply_es_throttle(self, target_weights: Dict[str, float]) -> Tuple[Dict[str, float], bool]:
+        """Apply Expected Shortfall throttle to reduce gross exposure."""
+        es = self.calculate_expected_shortfall()
+        
+        if es < self.es_threshold:
+            # ES indicates tail risk - throttle gross exposure
+            throttled_weights = {}
+            for symbol, weight in target_weights.items():
+                if symbol == 'CASH':
+                    throttled_weights[symbol] = weight
+                else:
+                    throttled_weights[symbol] = weight * self.es_throttle_factor
+            
+            logger.warning(f"ES throttle activated: ES={es:.3%} < threshold={self.es_threshold:.3%}, "
+                         f"reducing gross exposure by {(1-self.es_throttle_factor):.1%}")
+            
+            return throttled_weights, True
+        
+        return target_weights, False
+    
     def rebalance_to_target(self, target_weights: Dict[str, float]) -> Dict[str, float]:
         """
-        Rebalance portfolio to target weights.
+        Rebalance portfolio to target weights with capacity and ES constraints.
         
         Args:
             target_weights: Dictionary of symbol -> target weight
@@ -92,13 +211,19 @@ class Portfolio:
         Returns:
             Dictionary of required trades (symbol -> dollar amount)
         """
+        # Apply capacity constraints
+        capacity_constrained_weights = self.apply_capacity_constraints(target_weights)
+        
+        # Apply ES throttle
+        final_weights, es_throttled = self.apply_es_throttle(capacity_constrained_weights)
+        
         current_value = self._calculate_portfolio_value()
         current_weights = self.get_current_weights()
         
         # Calculate required trades
         trades = {}
         
-        for symbol, target_weight in target_weights.items():
+        for symbol, target_weight in final_weights.items():
             current_weight = current_weights.get(symbol, 0.0)
             weight_diff = target_weight - current_weight
             dollar_diff = weight_diff * current_value
