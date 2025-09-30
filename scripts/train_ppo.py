@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-PPO training script for execution optimization.
-Creates a simple trading execution environment and trains a PPO agent.
+Enhanced PPO training script for execution optimization with vectorized environments.
+Creates trading execution environments and trains PPO agent with early stopping.
 """
 
 import argparse
@@ -9,8 +9,10 @@ import logging
 import sys
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import time
+from datetime import datetime
+import yaml
 
 # Add algos to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -18,13 +20,25 @@ sys.path.append(str(Path(__file__).parent.parent))
 try:
     import numpy as np
     import pandas as pd
-    import gym
-    from gym import spaces
+    import gymnasium as gym
+    from gymnasium import spaces
     from stable_baselines3 import PPO
     from stable_baselines3.common.env_util import make_vec_env
-    from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold
+    from stable_baselines3.common.callbacks import (
+        EvalCallback, StopTrainingOnRewardThreshold, 
+        CheckpointCallback, BaseCallback
+    )
     from stable_baselines3.common.monitor import Monitor
+    from stable_baselines3.common.vec_env import VecNormalize, DummyVecEnv, SubprocVecEnv
     import torch
+    import matplotlib.pyplot as plt
+    
+    # Optional dependencies
+    try:
+        import optuna
+        OPTUNA_AVAILABLE = True
+    except ImportError:
+        OPTUNA_AVAILABLE = False
     
     from algos.core.config_loader import load_config
     
@@ -44,10 +58,12 @@ logger = logging.getLogger(__name__)
 
 class TradingExecutionEnv(gym.Env):
     """
-    Simple trading execution environment for PPO training.
+    Enhanced trading execution environment with realistic market dynamics.
     
-    State: [price, spread, atr, signal_prob, current_position, time_in_position]
-    Action: [position_delta, limit_offset] (continuous)
+    State: [price, spread, atr, signal_prob, current_position, time_in_position, 
+            volume_ratio, regime, capacity_flag]
+    Action: [position_delta_pct, order_type, limit_offset_pct] (continuous)
+    """
     Reward: Based on execution quality and slippage minimization
     """
     
