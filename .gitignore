@@ -96,4 +96,4 @@ live/
 docs/_build/
 
 # Node modules (if any JS tools)
-node_modules/
+node_modules/.venv/
