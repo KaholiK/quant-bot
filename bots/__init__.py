@@ -2,15 +2,16 @@
 Discord bot runner for quant trading control.
 """
 
-import os
 import asyncio
+import os
+
 from loguru import logger
 
 
 def run_discord_bot():
     """Run Discord bot if token is configured."""
     token = os.getenv("DISCORD_BOT_TOKEN")
-    
+
     if not token:
         print("""
 🤖 Discord Bot Setup Instructions:
@@ -31,7 +32,7 @@ ADMIN_TOKEN=your_admin_api_token
 Then run: python -m bots
         """)
         return
-    
+
     try:
         from .discord_bot import main
         asyncio.run(main())

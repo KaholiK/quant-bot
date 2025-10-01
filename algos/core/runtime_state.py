@@ -3,10 +3,11 @@ Runtime state management for quant trading bot.
 Thread-safe in-memory state that serves as single source of truth for UI → Algo control.
 """
 
-import threading
 import json
+import threading
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any
+
 from loguru import logger
 
 from .config_loader import QuantBotConfig
@@ -14,26 +15,26 @@ from .config_loader import QuantBotConfig
 
 class RuntimeState:
     """Thread-safe runtime state management for trading bot."""
-    
+
     def __init__(self):
         self._lock = threading.RLock()  # Reentrant lock for nested calls
-        
+
         # Core state
         self._trading_paused = False
         self._kill_switch_active = False
         self._last_kill_reason = ""
         self._last_regime = "unknown"
-        
+
         # Strategy toggles
-        self._strategy_enabled: Dict[str, bool] = {}
-        
+        self._strategy_enabled: dict[str, bool] = {}
+
         # Risk parameters (can be updated at runtime)
-        self._risk_params: Dict[str, float] = {}
-        
+        self._risk_params: dict[str, float] = {}
+
         # Metadata
         self._last_update = datetime.utcnow()
         self._last_heartbeat = datetime.utcnow()
-    
+
     def load_from_config(self, config: QuantBotConfig) -> None:
         """Load initial state from configuration."""
         with self._lock:
@@ -45,7 +46,7 @@ class RuntimeState:
                 "market_neutral": config.trading.strategies.market_neutral.enabled,
                 "gamma_reversal": config.trading.strategies.gamma_reversal.enabled,
             }
-            
+
             # Initialize risk parameters
             self._risk_params = {
                 "per_trade_risk_pct": config.trading.risk.per_trade_risk_pct,
@@ -58,11 +59,11 @@ class RuntimeState:
                 "day_stop_dd": config.trading.risk.day_stop_dd,
                 "week_stop_dd": config.trading.risk.week_stop_dd,
             }
-            
+
             self._last_update = datetime.utcnow()
             logger.info("Runtime state loaded from configuration")
-    
-    def to_dict(self) -> Dict[str, Any]:
+
+    def to_dict(self) -> dict[str, Any]:
         """Serialize state to dictionary for JSON export."""
         with self._lock:
             return {
@@ -76,12 +77,12 @@ class RuntimeState:
                 "last_heartbeat": self._last_heartbeat.isoformat(),
                 "version": "1.0",
             }
-    
+
     def to_json(self) -> str:
         """Serialize state to JSON string."""
         return json.dumps(self.to_dict(), indent=2)
-    
-    def apply_patch(self, patch: Dict[str, Any]) -> bool:
+
+    def apply_patch(self, patch: dict[str, Any]) -> bool:
         """
         Apply state changes from external UI.
         
@@ -94,7 +95,7 @@ class RuntimeState:
         with self._lock:
             try:
                 applied_changes = []
-                
+
                 # Handle pause/resume
                 if "trading_paused" in patch:
                     old_value = self._trading_paused
@@ -102,7 +103,7 @@ class RuntimeState:
                     if old_value != self._trading_paused:
                         status = "paused" if self._trading_paused else "resumed"
                         applied_changes.append(f"trading {status}")
-                
+
                 # Handle strategy toggles
                 if "strategy_enabled" in patch:
                     strategy_patch = patch["strategy_enabled"]
@@ -113,7 +114,7 @@ class RuntimeState:
                             if old_value != self._strategy_enabled[strategy]:
                                 status = "enabled" if enabled else "disabled"
                                 applied_changes.append(f"{strategy} {status}")
-                
+
                 # Handle risk parameter updates
                 if "risk_params" in patch:
                     risk_patch = patch["risk_params"]
@@ -121,7 +122,7 @@ class RuntimeState:
                         if param in self._risk_params:
                             old_value = self._risk_params[param]
                             new_value = float(value)
-                            
+
                             # Validate ranges
                             if self._validate_risk_param(param, new_value):
                                 self._risk_params[param] = new_value
@@ -129,7 +130,7 @@ class RuntimeState:
                                     applied_changes.append(f"{param}: {old_value:.4f} → {new_value:.4f}")
                             else:
                                 logger.warning(f"Invalid risk parameter value: {param}={new_value}")
-                
+
                 # Handle kill switch
                 if "kill_switch_active" in patch:
                     if patch["kill_switch_active"]:
@@ -139,18 +140,18 @@ class RuntimeState:
                     else:
                         self.resume()
                         applied_changes.append("kill switch deactivated")
-                
+
                 # Update metadata
                 if applied_changes:
                     self._last_update = datetime.utcnow()
                     logger.info(f"Applied runtime state changes: {', '.join(applied_changes)}")
-                
+
                 return True
-                
+
             except Exception as e:
                 logger.error(f"Failed to apply runtime state patch: {e}")
                 return False
-    
+
     def _validate_risk_param(self, param: str, value: float) -> bool:
         """Validate risk parameter value is within acceptable range."""
         validations = {
@@ -164,10 +165,10 @@ class RuntimeState:
             "day_stop_dd": lambda x: 0.0 < x <= 0.5,
             "week_stop_dd": lambda x: 0.0 < x <= 0.5,
         }
-        
+
         validator = validations.get(param)
         return validator(value) if validator else False
-    
+
     def mark_kill(self, reason: str) -> None:
         """Activate kill switch with reason."""
         with self._lock:
@@ -176,7 +177,7 @@ class RuntimeState:
             self._last_kill_reason = reason
             self._last_update = datetime.utcnow()
             logger.warning(f"Kill switch activated: {reason}")
-    
+
     def resume(self) -> None:
         """Resume trading (deactivate kill switch and unpause)."""
         with self._lock:
@@ -185,12 +186,12 @@ class RuntimeState:
             self._last_kill_reason = ""
             self._last_update = datetime.utcnow()
             logger.info("Trading resumed - kill switch deactivated")
-    
+
     def heartbeat(self) -> None:
         """Update heartbeat timestamp."""
         with self._lock:
             self._last_heartbeat = datetime.utcnow()
-    
+
     def update_regime(self, regime: str) -> None:
         """Update current market regime."""
         with self._lock:
@@ -198,57 +199,57 @@ class RuntimeState:
                 self._last_regime = regime
                 self._last_update = datetime.utcnow()
                 logger.info(f"Market regime updated to: {regime}")
-    
+
     # Read-only properties
     @property
     def trading_paused(self) -> bool:
         """Get trading pause status."""
         with self._lock:
             return self._trading_paused
-    
+
     @property
     def kill_switch_active(self) -> bool:
         """Get kill switch status."""
         with self._lock:
             return self._kill_switch_active
-    
+
     @property
     def last_kill_reason(self) -> str:
         """Get last kill switch reason."""
         with self._lock:
             return self._last_kill_reason
-    
+
     @property
-    def strategy_enabled(self) -> Dict[str, bool]:
+    def strategy_enabled(self) -> dict[str, bool]:
         """Get strategy enabled states."""
         with self._lock:
             return self._strategy_enabled.copy()
-    
+
     @property
-    def risk_params(self) -> Dict[str, float]:
+    def risk_params(self) -> dict[str, float]:
         """Get current risk parameters."""
         with self._lock:
             return self._risk_params.copy()
-    
+
     @property
     def last_regime(self) -> str:
         """Get last known market regime."""
         with self._lock:
             return self._last_regime
-    
+
     def get_strategy_enabled(self, strategy: str) -> bool:
         """Get enabled status for specific strategy."""
         with self._lock:
             return self._strategy_enabled.get(strategy, False)
-    
-    def get_risk_param(self, param: str) -> Optional[float]:
+
+    def get_risk_param(self, param: str) -> float | None:
         """Get specific risk parameter value."""
         with self._lock:
             return self._risk_params.get(param)
 
 
 # Global instance for singleton access
-_runtime_state: Optional[RuntimeState] = None
+_runtime_state: RuntimeState | None = None
 
 
 def get_runtime_state() -> RuntimeState:

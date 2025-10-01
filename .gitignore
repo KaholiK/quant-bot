@@ -46,6 +46,7 @@ policies_backup_*/
 .env
 .env.*
 !.env.example
+!.env.template
 
 # IDE
 .vscode/

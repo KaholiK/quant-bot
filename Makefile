@@ -1,9 +1,10 @@
-.PHONY: help env.smoke db.init db.purge data.crypto data.equities backtest.quick paper.quick lint test clean
+.PHONY: help env.smoke smoke db.init db.purge data.crypto data.equities backtest.quick paper.quick lint test test.cov clean up down logs shell build
 
 # Default target
 help:
 	@echo "Available targets:"
 	@echo "  env.smoke         - Run environment smoke test"
+	@echo "  smoke             - Run quick smoke test (imports, settings, 3-bar backtest)"
 	@echo "  db.init           - Initialize database schema"
 	@echo "  db.purge          - Purge simulation data (interactive)"
 	@echo "  data.crypto       - Download sample crypto data (BTC, ETH)"
@@ -12,11 +13,28 @@ help:
 	@echo "  paper.quick       - Run 1-hour paper trading simulation"
 	@echo "  lint              - Run linters (ruff, black, mypy)"
 	@echo "  test              - Run pytest"
+	@echo "  test.cov          - Run pytest with coverage (fails if < 90%)"
 	@echo "  clean             - Clean build artifacts and caches"
+	@echo ""
+	@echo "Docker targets:"
+	@echo "  build             - Build Docker images"
+	@echo "  up                - Start containers (app + db)"
+	@echo "  down              - Stop and remove containers"
+	@echo "  logs              - Follow container logs"
+	@echo "  shell             - Open shell in dev container"
 
 # Environment validation
 env.smoke:
 	python -m scripts.env_smoke
+
+# Quick smoke test
+smoke:
+	@echo "Running smoke test..."
+	@python -c "import config.settings; print('✅ Settings loaded')"
+	@python -c "import data.cache_io; print('✅ Cache I/O loaded')"
+	@python -c "import storage.db; print('✅ Database models loaded')"
+	@python -c "import data_tools.validate; print('✅ Validation tools loaded')"
+	@echo "✅ All critical modules import successfully"
 
 # Database management
 db.init:
@@ -67,6 +85,11 @@ lint:
 test:
 	pytest -v
 
+# Testing with coverage
+test.cov:
+	@echo "Running tests with coverage..."
+	pytest --cov=. --cov-report=term-missing --cov-report=html --cov-fail-under=90 -v
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
@@ -77,3 +100,24 @@ clean:
 	find . -type d -name ".ruff_cache" -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
 	@echo "Clean complete"
+
+# Docker targets
+build:
+	@echo "Building Docker images..."
+	docker compose build
+
+up:
+	@echo "Starting containers..."
+	docker compose up -d
+	@echo "Containers started. Use 'make logs' to view logs."
+
+down:
+	@echo "Stopping containers..."
+	docker compose down
+
+logs:
+	docker compose logs -f
+
+shell:
+	@echo "Opening shell in dev container..."
+	docker compose --profile dev run --rm dev

@@ -3,11 +3,12 @@ Configuration loader with pydantic validation for the quant trading bot.
 Provides type-safe configuration loading with backward compatibility.
 """
 
-from typing import Dict, Any, List, Optional, Union
-import yaml
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any
+
+import yaml
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +16,10 @@ logger = logging.getLogger(__name__)
 class UniverseConfig(BaseModel):
     """Configuration for trading universe."""
     equities: str = Field(default="SP100", description="Equity universe identifier")
-    crypto: List[str] = Field(default=["BTCUSD", "ETHUSD"], description="Crypto pairs to trade")
+    crypto: list[str] = Field(default=["BTCUSD", "ETHUSD"], description="Crypto pairs to trade")
 
 
-class BarsConfig(BaseModel):  
+class BarsConfig(BaseModel):
     """Configuration for bar data timeframes."""
     equities: str = Field(default="30m", description="Equity bar timeframe")
     crypto: str = Field(default="15m", description="Crypto bar timeframe")
@@ -67,11 +68,11 @@ class StrategiesConfig(BaseModel):
 
 class FeaturesConfig(BaseModel):
     """Feature engineering configuration."""
-    returns_periods: List[int] = Field(default=[1, 5, 20, 60], description="Return calculation periods")
-    sma_periods: List[int] = Field(default=[20, 50, 200], description="Simple moving average periods")
-    ema_periods: List[int] = Field(default=[12, 26], description="Exponential moving average periods")
-    macd_params: Dict[str, int] = Field(
-        default={"fast": 12, "slow": 26, "signal": 9}, 
+    returns_periods: list[int] = Field(default=[1, 5, 20, 60], description="Return calculation periods")
+    sma_periods: list[int] = Field(default=[20, 50, 200], description="Simple moving average periods")
+    ema_periods: list[int] = Field(default=[12, 26], description="Exponential moving average periods")
+    macd_params: dict[str, int] = Field(
+        default={"fast": 12, "slow": 26, "signal": 9},
         description="MACD parameters"
     )
     atr_period: int = Field(default=14, description="ATR calculation period")
@@ -88,19 +89,19 @@ class LabelsConfig(BaseModel):
 
 class LearningConfig(BaseModel):
     """Machine learning configuration."""
-    cv: Dict[str, Any] = Field(
+    cv: dict[str, Any] = Field(
         default={
-            "scheme": "purged_kfold_embargo", 
-            "folds": 5, 
+            "scheme": "purged_kfold_embargo",
+            "folds": 5,
             "embargo_frac": 0.02
         },
         description="Cross-validation configuration"
     )
     retrain_cadence: str = Field(default="weekly", description="Model retraining frequency")
-    gates: Dict[str, float] = Field(
+    gates: dict[str, float] = Field(
         default={
             "oos_sortino_min": 1.2,
-            "oos_profit_factor_min": 1.15, 
+            "oos_profit_factor_min": 1.15,
             "oos_max_dd_max": 0.06
         },
         description="Model promotion gates"
@@ -128,7 +129,7 @@ class CapacityConfig(BaseModel):
 
 class ExecutionConfig(BaseModel):
     """Execution configuration."""
-    maker_ladder_offsets_atr: List[float] = Field(
+    maker_ladder_offsets_atr: list[float] = Field(
         default=[0.10, 0.20, 0.30],
         description="Maker ladder offsets in ATR units"
     )
@@ -170,7 +171,7 @@ class TradingConfig(BaseModel):
     strategies: StrategiesConfig = StrategiesConfig()
     learning: LearningConfig = LearningConfig()
     execution: ExecutionConfig = ExecutionConfig()
-    strategy_priority_by_regime: Dict[str, List[str]] = Field(
+    strategy_priority_by_regime: dict[str, list[str]] = Field(
         default={
             "trend": ["trend_breakout", "bull_mode", "scalper_sigma", "market_neutral", "gamma_reversal"],
             "chop": ["scalper_sigma", "market_neutral", "gamma_reversal", "trend_breakout", "bull_mode"],
@@ -185,46 +186,46 @@ class TradingConfig(BaseModel):
 class QuantBotConfig(BaseModel):
     """Root configuration model."""
     trading: TradingConfig = TradingConfig()
-    
+
     model_config = {"extra": "allow"}  # Allow additional fields for backward compatibility
 
 
-def _normalize_legacy_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_legacy_config(config_data: dict[str, Any]) -> dict[str, Any]:
     """Normalize legacy flat configuration to new nested structure."""
-    
+
     # If already has trading key, return as-is
     if "trading" in config_data:
         return config_data
-    
+
     logger.info("Normalizing legacy configuration format")
-    
+
     normalized = {"trading": {}}
     trading = normalized["trading"]
-    
+
     # Map legacy keys to new structure
     legacy_mappings = {
         # Universe mappings
         "universe": "universe",
-        
-        # Risk mappings  
+
+        # Risk mappings
         "risk": "risk",
         "max_leverage": ("risk", "max_leverage"),
         "max_position_pct": ("risk", "single_name_max_pct"),
         "max_sector_pct": ("risk", "sector_max_pct"),
         "risk_pct_per_trade": ("risk", "per_trade_risk_pct"),
         "kill_switch_dd": ("risk", "kill_switch_dd"),
-        
+
         # Features, labels, strategies - pass through
         "features": "features",
-        "labels": "labels", 
+        "labels": "labels",
         "strategies": "strategies",
         "learning": "learning",
         "execution": "execution",
-        
+
         # Models
         "models": "models"
     }
-    
+
     # Process legacy mappings
     for legacy_key, target in legacy_mappings.items():
         if legacy_key in config_data:
@@ -237,12 +238,12 @@ def _normalize_legacy_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 # Direct mapping
                 trading[target] = config_data[legacy_key]
-    
+
     # Handle special cases for bars configuration
     if "universe" in config_data:
         universe_data = config_data["universe"]
         bars_config = {}
-        
+
         if "equities" in universe_data and "resolution" in universe_data["equities"]:
             resolution = universe_data["equities"]["resolution"]
             # Convert LEAN resolution to our format
@@ -252,19 +253,19 @@ def _normalize_legacy_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
                 "OneMinute": "1m"
             }
             bars_config["equities"] = resolution_map.get(resolution, "30m")
-            
+
         if "crypto" in universe_data and "resolution" in universe_data["crypto"]:
             resolution = universe_data["crypto"]["resolution"]
             bars_config["crypto"] = resolution_map.get(resolution, "15m")
-            
+
         if bars_config:
             trading["bars"] = bars_config
-    
+
     # Copy any remaining top-level keys (models, execution, etc.)
     for key, value in config_data.items():
         if key not in legacy_mappings and key != "trading":
             normalized[key] = value
-    
+
     return normalized
 
 
@@ -283,37 +284,37 @@ def load_config(path: str = "config.yaml") -> QuantBotConfig:
         ValueError: If configuration is invalid
     """
     config_path = Path(path)
-    
+
     if not config_path.exists():
         logger.warning(f"Config file not found at {path}, using defaults")
         return QuantBotConfig()
-    
+
     try:
-        with open(config_path, 'r') as f:
+        with open(config_path) as f:
             raw_config = yaml.safe_load(f)
     except Exception as e:
         raise ValueError(f"Failed to parse YAML config: {e}")
-    
+
     if not raw_config:
         logger.warning("Empty config file, using defaults")
         return QuantBotConfig()
-    
+
     # Normalize legacy configuration
     normalized_config = _normalize_legacy_config(raw_config)
-    
+
     try:
         config = QuantBotConfig.model_validate(normalized_config)
     except Exception as e:
         raise ValueError(f"Configuration validation failed: {e}")
-    
+
     # Log redacted configuration (remove sensitive fields)
     redacted_dict = config.model_dump(exclude={"trading": {"models": {"classifier_path", "meta_model_path", "rl_policy_path"}}})
     logger.info(f"Loaded configuration: {redacted_dict}")
-    
+
     return config
 
 
-def get_legacy_dict(config: QuantBotConfig) -> Dict[str, Any]:
+def get_legacy_dict(config: QuantBotConfig) -> dict[str, Any]:
     """
     Convert configuration back to legacy dictionary format for backward compatibility.
     
@@ -324,18 +325,18 @@ def get_legacy_dict(config: QuantBotConfig) -> Dict[str, Any]:
         Legacy format dictionary
     """
     config_dict = config.model_dump()
-    
+
     # Flatten trading section for legacy compatibility
     result = {}
-    
+
     # Copy trading section contents to root
     trading = config_dict.get("trading", {})
     for key, value in trading.items():
         result[key] = value
-    
+
     # Copy other top-level sections
     for key, value in config_dict.items():
         if key != "trading":
             result[key] = value
-    
+
     return result
