@@ -1,0 +1,87 @@
+# W&B Sweep Configuration for PPO Execution Policy
+# 
+# Usage:
+#   wandb sweep sweeps/ppo_sweep.yaml
+#   wandb agent <sweep_id>
+
+program: scripts/train_ppo.py
+method: bayes
+metric:
+  name: eval/mean_reward
+  goal: maximize
+
+parameters:
+  # PPO hyperparameters
+  learning_rate:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.001
+  
+  n_steps:
+    values: [512, 1024, 2048, 4096]
+  
+  batch_size:
+    values: [64, 128, 256, 512]
+  
+  n_epochs:
+    values: [3, 5, 10, 20]
+  
+  gamma:
+    distribution: uniform
+    min: 0.95
+    max: 0.999
+  
+  gae_lambda:
+    distribution: uniform
+    min: 0.9
+    max: 0.99
+  
+  clip_range:
+    distribution: uniform
+    min: 0.1
+    max: 0.3
+  
+  ent_coef:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.01
+  
+  vf_coef:
+    distribution: uniform
+    min: 0.1
+    max: 1.0
+  
+  max_grad_norm:
+    distribution: uniform
+    min: 0.3
+    max: 1.0
+  
+  # Network architecture
+  net_arch:
+    values: 
+      - "[64, 64]"
+      - "[128, 128]"
+      - "[256, 256]"
+      - "[64, 64, 64]"
+      - "[128, 128, 128]"
+  
+  # Training parameters
+  total_timesteps:
+    value: 100000
+  
+  # Environment parameters
+  symbols:
+    value: "SPY,QQQ"
+  
+  start_date:
+    value: "2023-01-01"
+  
+  end_date:
+    value: "2024-01-01"
+
+# Early termination for poor performers
+early_terminate:
+  type: hyperband
+  min_iter: 5
+  s: 2
+  eta: 3

@@ -30,8 +30,8 @@ ENV/
 *.ipynb_checkpoints
 notebooks/.ipynb_checkpoints
 
-# Data directories
-data/
+# Data directories (but allow data/providers and data/cache code)
+data/cache/*.parquet
 backtests/
 exports/
 reports/
@@ -97,3 +97,4 @@ docs/_build/
 
 # Node modules (if any JS tools)
 node_modules/
+# Data cache

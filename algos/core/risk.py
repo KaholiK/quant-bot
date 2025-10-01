@@ -13,6 +13,23 @@ import requests
 from loguru import logger
 
 
+class PositionDict(dict):
+    """
+    Enhanced dict that allows direct comparison with floats for backward compatibility.
+    Supports both dict access (position["quantity"]) and float comparison (position == 100.0).
+    """
+    def __eq__(self, other):
+        if isinstance(other, (int, float)):
+            return abs(self.get("quantity", 0.0) - other) < 1e-9
+        return super().__eq__(other)
+    
+    def __float__(self):
+        return float(self.get("quantity", 0.0))
+    
+    def __abs__(self):
+        return abs(self.get("quantity", 0.0))
+
+
 class RiskManager:
     """Comprehensive risk management system for trading algorithms."""
 
@@ -34,6 +51,10 @@ class RiskManager:
         self.risk_pct_per_trade = self.risk_config.get("per_trade_risk_pct", 0.01)
         self.vol_target_ann = self.risk_config.get("vol_target_ann", 0.12)
         self.kill_switch_dd = self.risk_config.get("kill_switch_dd", 0.20)
+        
+        # Backward compatibility aliases
+        self.max_position_pct = self.risk_config.get("max_position_pct", self.single_name_max_pct)
+        self.vol_target = self.risk_config.get("vol_target", self.vol_target_ann)
 
         # New risk features
         self.day_stop_dd = self.risk_config.get("day_stop_dd", 0.06)
@@ -185,14 +206,14 @@ class RiskManager:
         else:
             avg_price = 0.0
 
-        # Update position data
-        self.positions[symbol] = {
+        # Update position data using PositionDict for backward compatibility
+        self.positions[symbol] = PositionDict({
             "quantity": new_quantity,
             "avg_price": avg_price,
             "last_price": price,
             "unrealized_pnl": (price - avg_price) * new_quantity if new_quantity != 0 else 0.0,
             "timestamp": datetime.now()
-        }
+        })
 
         # Update sector exposure
         sector = sector or self._get_sector(symbol)

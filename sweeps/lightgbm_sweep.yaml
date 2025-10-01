@@ -1,0 +1,87 @@
+# W&B Sweep Configuration for LightGBM Classifier
+# 
+# Usage:
+#   wandb sweep sweeps/lightgbm_sweep.yaml
+#   wandb agent <sweep_id>
+
+program: scripts/train_classifier.py
+method: bayes
+metric:
+  name: val/sharpe
+  goal: maximize
+
+parameters:
+  # Model type
+  model:
+    value: lightgbm
+  
+  # LightGBM hyperparameters
+  num_leaves:
+    values: [15, 31, 63, 127, 255]
+  
+  max_depth:
+    values: [-1, 3, 5, 7, 10]
+  
+  learning_rate:
+    distribution: log_uniform_values
+    min: 0.01
+    max: 0.3
+  
+  n_estimators:
+    values: [50, 100, 200, 300, 500]
+  
+  min_child_samples:
+    values: [5, 10, 20, 30, 50]
+  
+  subsample:
+    distribution: uniform
+    min: 0.6
+    max: 1.0
+  
+  colsample_bytree:
+    distribution: uniform
+    min: 0.6
+    max: 1.0
+  
+  reg_alpha:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 10.0
+  
+  reg_lambda:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 10.0
+  
+  min_split_gain:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 1.0
+  
+  # Training parameters
+  cv_folds:
+    value: 5
+  
+  embargo_frac:
+    value: 0.02
+  
+  # Labeling parameters
+  tp_atr_mult:
+    distribution: uniform
+    min: 1.5
+    max: 2.0
+  
+  sl_atr_mult:
+    distribution: uniform
+    min: 0.8
+    max: 1.2
+  
+  horizon_bars:
+    values: [3, 5, 7, 10]
+
+# Early termination
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  s: 2
+  eta: 3
