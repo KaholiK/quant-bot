@@ -97,3 +97,5 @@ docs/_build/
 
 # Node modules (if any JS tools)
 node_modules/
+# Data cache
+data/cache/*.parquet
