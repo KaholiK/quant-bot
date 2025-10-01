@@ -396,3 +396,94 @@ docker compose --profile dev run --rm -p 8888:8888 dev jupyter lab --ip 0.0.0.0 
 ---
 
 **Last Updated:** September 30, 2025
+
+## GitHub Actions Integration
+
+The repository includes two automated workflows that run in Docker-like containerized environments:
+
+### CI Workflow (`.github/workflows/ci.yml`)
+
+Runs on every push and pull request:
+- **Linting:** `ruff check .`
+- **Type checking:** `mypy .`
+- **Security audit:** `pip-audit`
+- **Tests:** `pytest` with coverage
+- **Artifacts:** Coverage reports uploaded
+
+**Local equivalent:**
+```bash
+make lint
+make typecheck
+make audit
+make test
+```
+
+### Retrain Workflow (`.github/workflows/retrain.yml`)
+
+Runs daily at 03:00 UTC or on manual dispatch:
+- **Daily backtest:** Quick validation on AAPL, SPY, BTC-USD (1 week)
+- **Model training:** Fast retraining if `make retrain` target exists
+- **Model gates:** Validates and promotes models based on performance
+- **Discord reports:** Sends daily summary to Discord webhook
+- **Artifacts:** Model files and reports uploaded
+
+**Local equivalent:**
+```bash
+make backtest     # Quick validation backtest
+make retrain      # Fast model retraining
+```
+
+**Secrets required (add to GitHub repository settings):**
+- `DISCORD_WEBHOOK_URL` - For automated reports
+- `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY` - Paper trading
+- `POLYGON_API_KEY` - Market data
+- Other provider keys as needed (see `.env.template`)
+
+**Manual workflow dispatch:**
+```bash
+# Via GitHub web UI: Actions → Retrain-and-Backtest → Run workflow
+# Or via GitHub CLI:
+gh workflow run retrain.yml
+```
+
+## Docker Best Practices
+
+### Production Deployment
+
+1. **Use specific image tags:**
+   ```dockerfile
+   FROM python:3.11-slim-bookworm
+   ```
+
+2. **Run as non-root user:**
+   ```dockerfile
+   USER botuser
+   ```
+
+3. **Multi-stage builds for smaller images:**
+   ```dockerfile
+   FROM python:3.11-slim as builder
+   # Install dependencies
+   FROM python:3.11-slim as runtime
+   # Copy only what's needed
+   ```
+
+4. **Health checks:**
+   ```dockerfile
+   HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+     CMD python -c "import sys; sys.exit(0)"
+   ```
+
+### Docker + CI/CD
+
+The GitHub Actions workflows use ubuntu-latest with Python 3.11, which provides a similar environment to the Docker containers. To ensure consistency:
+
+1. **Pin dependency versions** in `requirements.lock.txt`
+2. **Test locally** before pushing:
+   ```bash
+   make lint && make typecheck && make test
+   ```
+3. **Use same Python version** (3.11) locally and in CI
+4. **Monitor workflow runs** for any environment-specific issues
+
+See [SECURITY.md](SECURITY.md) for secrets management and [README.md](README.md) for local development setup.

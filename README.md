@@ -21,71 +21,91 @@ A sophisticated Python 3.11 quantitative trading bot for QuantConnect LEAN with 
 - **📊 Production Monitoring**: Discord alerts, comprehensive logging, performance tracking
 - **🛡️ Robust Architecture**: Type-safe configuration, broker adapters, comprehensive testing
 
-## 📦 Quickstart: Paper Trading in 5 Steps
+## 📦 Quickstart: Local Development Setup
 
-Get up and running with paper trading and Discord control in minutes:
+Get up and running with local development in minutes:
 
-### 1. Install
+### 1. Clone and Setup
 ```bash
 git clone https://github.com/KaholiK/quant-bot.git
 cd quant-bot
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ### 2. Configure Environment
 ```bash
-cp .env.example .env
+cp .env.template .env
 # Edit .env - minimum required:
 # - Add DISCORD_BOT_TOKEN (from Discord Developer Portal)
 # - Add DISCORD_GUILD_ID (your Discord server ID)
 # - Add DISCORD_REPORTS_CHANNEL_ID (channel for reports)
-# - Add at least one data provider key (TIINGO_API_KEY or COINGECKO_API_KEY)
+# - Add Alpaca paper trading credentials (ALPACA_API_KEY_ID, ALPACA_API_SECRET_KEY)
+# - Add at least one data provider key (POLYGON_API_KEY, TIINGO_API_KEY, or COINGECKO_API_KEY)
 
 # Verify configuration
 python -m scripts.env_smoke
 ```
 
-### 3. Initialize Database & Download Data
+### 3. Run CI Checks Locally
 ```bash
-# Initialize database (SQLite by default)
-make db.init
+# Run linting
+make lint         # or: ruff check .
 
-# Download sample data
-make data.crypto      # BTC/ETH hourly data (Jan-Sep 2024)
-make data.equities    # SPY/AAPL daily data (2023-2024)
+# Run type checking
+make typecheck    # or: mypy .
+
+# Run security audit
+make audit        # or: pip-audit -r requirements.txt
+
+# Run tests
+make test         # or: pytest -q
 ```
 
 ### 4. Run Backtest
 ```bash
-# Quick backtest with cached data
+# Quick bounded backtest (AAPL, 1 week)
+make backtest
+
+# Full backtest with cached data
 make backtest.quick
-
-# Or manual:
-python -m apps.backtest.run_backtest \
-    --start 2024-01-01 \
-    --end 2024-06-01 \
-    --universe SPY,AAPL \
-    --interval 1d
 ```
 
-### 5. Start Discord Bot
+### 5. Run Model Training
 ```bash
-# Start Discord control bot
-python -m ui.discord_bot.main
+# Fast model retraining (for testing)
+make retrain
 
-# In Discord, try:
-# /envcheck - Check configuration
-# /pnl 1w - Show P&L for last week
-# /trades 20 - Show recent trades
+# Full training with real data
+python scripts/train_classifier.py --start 2022-01-01 --end 2024-01-01
 ```
 
-**Next Steps:**
-- Run paper trading: `make paper.quick`
-- See [SETUP_ENV.md](SETUP_ENV.md) for detailed configuration
-- See [DATA_SETUP.md](DATA_SETUP.md) for data provider setup
-- See [OBSERVABILITY.md](OBSERVABILITY.md) for monitoring guide
+### 6. Configure Alpaca Paper Trading + Polygon Data
+
+**Alpaca Paper Trading (Free):**
+1. Sign up at https://alpaca.markets
+2. Get paper trading API keys from dashboard
+3. Add to `.env`:
+   ```
+   ALPACA_API_KEY_ID=your_key_id
+   ALPACA_API_SECRET_KEY=your_secret_key
+   ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets
+   ```
+
+**Polygon Data (Free tier):**
+1. Sign up at https://polygon.io
+2. Get API key from dashboard
+3. Add to `.env`:
+   ```
+   POLYGON_API_KEY=your_api_key
+   ```
+
+**Alternative Data Providers:**
+- Tiingo: https://www.tiingo.com (free tier available)
+- CoinGecko: https://www.coingecko.com/en/api (free for crypto)
+- Alpha Vantage: https://www.alphavantage.co (free tier available)
+- FRED: https://fred.stlouisfed.org/docs/api/fred/ (free economic data)
 
 ## 📋 Changelog
 

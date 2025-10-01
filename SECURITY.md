@@ -266,3 +266,85 @@ Users must comply with:
 
 **Last Updated:** September 30, 2025  
 **Next Review:** Before v0.1.0 release
+
+## GitHub Actions Security
+
+### Secrets Management
+
+The repository uses GitHub Secrets for sensitive credentials in CI/CD workflows:
+
+**Required secrets (add in repository Settings → Secrets and variables → Actions):**
+
+- `DISCORD_BOT_TOKEN` - Discord bot authentication
+- `DISCORD_GUILD_ID` - Discord server ID
+- `DISCORD_REPORTS_CHANNEL_ID` - Channel for automated reports
+- `DISCORD_WEBHOOK_URL` - Webhook for notifications
+- `ALPACA_API_KEY_ID` - Alpaca paper trading key ID
+- `ALPACA_API_SECRET_KEY` - Alpaca paper trading secret
+- `POLYGON_API_KEY` - Polygon market data
+- `ALPHAVANTAGE_API_KEY` - Alpha Vantage data (optional)
+- `FRED_API_KEY` - FRED economic data (optional)
+- `COINGECKO_API_KEY` - CoinGecko crypto data (optional)
+- `TIINGO_API_KEY` - Tiingo market data (optional)
+- `OPENAI_API_KEY` - OpenAI narration (optional)
+- `WANDB_API_KEY` - Weights & Biases tracking (optional)
+- `DATABASE_URL` - PostgreSQL connection string (optional)
+
+**Security best practices:**
+
+1. **Never log secrets** - Workflows create `.env` files from secrets without echoing values
+2. **Use read-only permissions** - Workflows use `permissions: contents: read` by default
+3. **Secrets rotation** - Rotate API keys quarterly or when compromised
+4. **Minimal scope** - Use paper trading credentials, not production keys
+5. **Audit access** - Review Actions logs regularly for unusual activity
+
+### Workflow Security
+
+**CI Workflow (`ci.yml`):**
+- Runs on pull requests and pushes to main
+- Read-only repository access
+- Secrets only used for optional services (Discord notifications)
+- All dependencies installed from pinned `requirements.lock.txt`
+- Security audit via `pip-audit` on every run
+
+**Retrain Workflow (`retrain.yml`):**
+- Runs daily at 03:00 UTC or on manual dispatch
+- Read-only repository access
+- Secrets used for data providers and model storage
+- Models validated before promotion
+- Artifacts retained for 30 days with access control
+
+**Concurrency controls:**
+- Both workflows use `concurrency: group: workflow-${{ github.ref }}` to prevent overlapping runs
+- `cancel-in-progress: true` stops duplicate runs
+
+**Artifact security:**
+- Coverage reports and model artifacts stored with GitHub's encryption
+- 30-day retention period
+- Access restricted to repository collaborators
+
+### Local Development vs CI
+
+**Local `.env` file:**
+- Use `.env.template` as starting point
+- Keep `.env` in `.gitignore` (already configured)
+- Never commit credentials to version control
+
+**CI environment:**
+- Secrets injected at runtime via GitHub Actions
+- `.env` file created dynamically in each workflow run
+- File destroyed when workflow completes
+
+### Incident Response
+
+If credentials are compromised:
+
+1. **Immediately rotate affected keys** in provider dashboards
+2. **Update GitHub secrets** with new credentials
+3. **Review Actions logs** for unauthorized access
+4. **Check artifact downloads** in repository insights
+5. **Audit recent workflow runs** for suspicious activity
+
+Report security issues to: [SECURITY_CONTACT_EMAIL]
+
+See [SETUP_ENV.md](SETUP_ENV.md) for detailed environment configuration.
